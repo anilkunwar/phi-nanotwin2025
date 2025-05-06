@@ -174,12 +174,18 @@ class Simulation:
         plt.close()
 
         # Save VTK file
-        grid = pv.RectilinearGrid(
-            np.linspace(0, self.params.Lx, self.params.Nx),
-            np.linspace(0, self.params.Ly, self.params.Ny),
-            [0.0]  # Z-direction (required for 3D structure)
-        )
-        grid.dimensions = (self.params.Nx, self.params.Ny, 1)  # 3D dimensions is required for 2D visualization
+        #grid = pv.RectilinearGrid(
+        #    np.linspace(0, self.params.Lx, self.params.Nx),
+        #    np.linspace(0, self.params.Ly, self.params.Ny),
+        #    [0.0]  # Z-direction (required for 3D structure)
+        #)
+        #grid.dimensions = (self.params.Nx, self.params.Ny, 1)  # 3D dimensions is required for 2D visualization
+        # Corrected PyVista grid initialization
+        x_coords = np.linspace(0, self.params.Lx, self.params.Nx)
+        y_coords = np.linspace(0, self.params.Ly, self.params.Ny)
+        z_coords = np.array([0.0])  # Single layer in z-direction
+    
+        grid = pv.RectilinearGrid(x_coords, y_coords, z_coords)
         grid.point_data['eta_m'] = self.eta[0].flatten(order='F')
         grid.point_data['eta_t'] = self.eta[1].flatten(order='F')
         vtr_path = os.path.join(self.output_dir, f'step_{step:06d}.vtr')
