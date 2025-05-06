@@ -15,7 +15,9 @@ from pathlib import Path
 class SimulationParameters:
     def __init__(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval):
         # Load material properties from YAML
-        yaml_file = f"{material.lower()}.yaml"
+        #yaml_file = f"{material.lower()}.yaml"
+        # Modified line with straightforward  definition of path:
+        yaml_file = os.path.join(os.path.dirname(__file__), f"{material.lower()}.yaml")
         if not os.path.exists(yaml_file):
             raise FileNotFoundError(f"YAML file for material '{material}' not found: {yaml_file}")
         with open(yaml_file, 'r') as file:
