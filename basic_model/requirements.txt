@@ -2,3 +2,5 @@ streamlit==1.22.0
 pyvista==0.39.1
 vtk==9.2.6
 numpy
+matplotlib
+scipy
