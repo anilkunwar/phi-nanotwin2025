@@ -1,7 +1,9 @@
-streamlit==1.22.0
-pyvista==0.39.1
+scipy==1.13.0
+numpy==1.26.4
+streamlit==1.35.0
+rich==13.9.4
+matplotlib==3.8.3
+plotly==5.18.0
+pyvista==0.44.0
 vtk==9.2.6
-pyyaml
-numpy
-matplotlib
-scipy
+pyyaml==6.0.1
