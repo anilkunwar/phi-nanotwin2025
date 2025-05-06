@@ -1,7 +1,18 @@
-scipy==1.13.0
-numpy==1.26.4
+# Core requirements
 streamlit==1.35.0
-matplotlib==3.8.3
+rich>=10.14.0,<14
+pygments>=2.13.0,<3.0.0
+markdown-it-py>=2.2.0
+
+# Scientific stack
+numpy==1.26.4
+scipy==1.13.0
+
+# Visualization
+pyvista==0.43.1
+vtk-osmesa==9.2.6
 plotly==5.18.0
-pyvista==0.39.1
+
+# Utilities
 pyyaml==6.0.1
+click==8.1.7
