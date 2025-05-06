@@ -1,0 +1,7 @@
+material: Cu
+sigma_ctb: 0.022  # J/m^2 (22 mJ/m^2)
+sigma_itb: 0.591  # J/m^2 (591 mJ/m^2)
+sigma_gb: 0.28    # J/m^2 (280 mJ/m^2)
+M_itb_prefactor: 1.178e-5  # m^4/(J·s)
+M_itb_activation_energy: 0.155  # eV
+# Reference: 

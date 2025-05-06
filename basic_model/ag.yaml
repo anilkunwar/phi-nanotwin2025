@@ -1,0 +1,7 @@
+material: Ag
+sigma_ctb: 0.008  # J/m^2 (8 mJ/m^2)
+sigma_itb: 0.126  # J/m^2 (126 mJ/m^2)
+sigma_gb: 0.79    # J/m^2 (790 mJ/m^2)
+M_itb_prefactor: 1.178e-5  # m^4/(J·s)
+M_itb_activation_energy: 0.15  # eV
+# Reference: https://www.sciencedirect.com/science/article/abs/pii/S1359645412002005

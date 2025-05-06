@@ -1,0 +1,7 @@
+material: Au
+sigma_ctb: 0.015  # J/m^2 (15 mJ/m^2)
+sigma_itb: 0.6    # J/m^2 (600 mJ/m^2, approximate)
+sigma_gb: 0.3     # J/m^2 (300 mJ/m^2, approximate)
+M_itb_prefactor: 1.178e-5  # m^4/(J·s)
+M_itb_activation_energy: 0.2  # eV (approximate)
+# Reference: https://www.nature.com/articles/s41467-023-41485-2

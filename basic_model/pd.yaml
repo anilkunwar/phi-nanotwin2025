@@ -1,0 +1,7 @@
+material: Pd
+sigma_ctb: 0.02   # J/m^2 (20 mJ/m^2)
+sigma_itb: 0.5    # J/m^2 (500 mJ/m^2)
+sigma_gb: 0.3     # J/m^2 (300 mJ/m^2)
+M_itb_prefactor: 1.178e-5  # m^4/(J·s)
+M_itb_activation_energy: 0.18  # eV
+# Reference:  
