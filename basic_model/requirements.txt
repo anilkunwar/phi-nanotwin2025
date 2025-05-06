@@ -4,5 +4,4 @@ streamlit==1.35.0
 matplotlib==3.8.3
 plotly==5.18.0
 pyvista==0.39.1
-vtk-osmesa==9.2.6  # Web-compatible VTK variant
 pyyaml==6.0.1
