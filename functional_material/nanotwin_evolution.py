@@ -8,9 +8,9 @@ from io import BytesIO
 import zipfile
 from datetime import datetime
 
-st.set_page_config(page_title="Tetragonal Twin Stress Analyzer", layout="wide")
-st.title("Tetragonal Twin Evolution in BaTiO₃ – Structural Phase-Field + Elastic Stress/Strain")
-st.markdown("**Multi-order-parameter model • Long-range elasticity • Publication-ready output**")
+st.set_page_config(page_title="Nanotwin Evolution in Ag FCC", layout="wide")
+st.title("Simplified Nanotwin Evolution in Ag FCC Matrix")
+st.markdown("**Structural multi-order-parameter phase-field model+ long-range elasticity**")
 
 # ==================================== USER INPUT ====================================
 col1, col2 = st.columns(2)
@@ -22,27 +22,27 @@ with col1:
     dt = st.number_input("Time step", 0.005, 0.1, 0.02, 0.005)
 
 with col2:
-    T = st.slider("Temperature (K)", 300, 600, 400)
+    T = st.slider("Temperature (K)", 300, 1000, 700)
     init = st.selectbox("Initial twin structure", 
-                       ["90° twin band", "Single lamella", "Random", "Vortex"])
+                       ["Single twin lamella", "Multiple twins", "Random"])
     twin_width_nm = st.slider("Twin thickness (nm)", 5, 50, 15)
 
-# ==================================== MATERIAL PARAMETERS ====================================
-p = 3  # 0: cubic matrix, 1: a-domain, 2: c-domain
+# ==================================== MATERIAL PARAMETERS (Ag FCC) ====================================
+p = 2  # 0: matrix, 1: twin
 w = 1.5          # interface energy coefficient
-mobility = 1.0
+kappa = 0.5      # gradient coefficient (isotropic, no inclination dependence)
+mobility = 1.178e-5 * np.exp(-0.155 / (8.617e-5 * T))  # MD-derived Arrhenius for ITB mobility
 
-# Transformation strains (Bain strain)
+# Eigenstrains for FCC twin (shear-based)
 ε00 = [
-    np.zeros((2,2)),                                        # cubic matrix
-    np.array([[ 0.01, 0.0], [0.0, -0.005]]),                   # a-domain (x-elongated)
-    np.array([[-0.005, 0.0], [0.0,  0.01 ]])                    # c-domain (y-elongated)
+    np.zeros((2,2)),                                        # matrix
+    np.array([[ 0.0, 0.707], [0.707,  0.0]]) / np.sqrt(2)   # twin (simplified {111}<112> shear)
 ]
 
-# Elastic constants (GPa)
-C11 = 275.0
-C12 = 179.0
-C44 = 54.3
+# Elastic constants for Ag (GPa)
+C11 = 124.0
+C12 = 93.4
+C44 = 46.1
 
 # ==================================== NUMBA KERNELS ====================================
 @njit(parallel=True)
@@ -60,14 +60,11 @@ def local_free_energy_deriv(etas):
     df = np.zeros((p, etas[0].shape[0], etas[0].shape[1]))
     for i in range(p):
         e2 = etas[i]**2
-        e4 = e2**2
-        df[i] += etas[i] * (e4 - e2)           # 1/4 e⁴ − 1/2 e²
-        for j in range(p):
-            if i != j:
-                df[i] += w * etas[i] * etas[j]**2
+        e4 = e2 * e2
+        df[i] += etas[i]**3 - etas[i] + 2 * etas[i] * sum(w * etas[j]**2 for j in range(p) if j != i)
     return df
 
-# ==================================== ELASTIC SOLVER (CORRECT & FAST) ====================================
+# ==================================== ELASTIC SOLVER ====================================
 def compute_stress_strain(etas, dx):
     nx = etas[0].shape[0]
     kx = 2*np.pi * np.fft.fftfreq(nx, d=dx)
@@ -89,32 +86,25 @@ def compute_stress_strain(etas, dx):
     e22h = fftn(e22)
     e12h = fftn(e12)
 
-    # Simple isotropic Green operator (very stable)
-    lam = C12 * 1e9
-    mu  = C44 * 1e9
-    factor = 1.0 / (4 * mu * K2)
+    # Plane-strain reduced constants
+    C11p = C11 - C12**2 / C11
+    C12p = C12 - C12**2 / C11
+    C44p = C44
 
     n1 = KX / np.sqrt(K2)
     n2 = KY / np.sqrt(K2)
 
-    # Stress in Fourier space
-    sigma11h = (lam + 2*mu) * e11h + lam * e22h
-    sigma22h = (lam + 2*mu) * e22h + lam * e11h
-    sigma12h = 2 * mu * e12h
+    # Stress in Fourier space (simplified isotropic)
+    sigma11h = C11p * e11h + C12p * e22h - (n1 * (C11p * n1 * e11h + C12p * n1 * e22h + 2*C44p * n2 * e12h) + n2 * (C12p * n2 * e11h + C11p * n2 * e22h + 2*C44p * n1 * e12h))
+    sigma22h = C11p * e22h + C12p * e11h - (n2 * (C11p * n2 * e22h + C12p * n2 * e11h + 2*C44p * n1 * e12h) + n1 * (C12p * n1 * e22h + C11p * n1 * e11h + 2*C44p * n2 * e12h))
+    sigma12h = 2*C44p * e12h - (n1 * (2*C44p * n2 * e12h) + n2 * (2*C44p * n1 * e12h))
 
-    # Remove elastic incompatibility term
-    B11 = n1*n1*sigma11h + n1*n2*sigma12h
-    B22 = n1*n2*sigma12h + n2*n2*sigma22h
-    sigma11h -= B11 * n1*n1
-    sigma22h -= B22 * n2*n2
-    sigma12h -= (B11*n2*n1 + B22*n1*n2)
-
-    s11 = np.real(ifftn(sigma11h)) / 1e9
-    s22 = np.real(ifftn(sigma22h)) / 1e9
-    s12 = np.real(ifftn(sigma12h)) / 1e9
+    s11 = np.real(ifftn(sigma11h))
+    s22 = np.real(ifftn(sigma22h))
+    s12 = np.real(ifftn(sigma12h))
 
     hydro = (s11 + s22) / 3
-    vm = np.sqrt(0.5 * ((s11-s22)**2 + 6*s12**2 + (s11+ s22)**2))
+    vm = np.sqrt(0.5 * ((s11 - s22)**2 + (s11 - hydro*3)**2 + (s22 - hydro*3)**2 + 6*s12**2))
 
     return s11, s22, s12, hydro, vm
 
@@ -124,25 +114,17 @@ def init_structure(choice):
     mid = N // 2
     tw = int(twin_width_nm / dx)
 
-    if choice == "90° twin band":
-        etas[1][:, :mid] = 1.0
-        etas[2][:, mid:] = 1.0
-    elif choice == "Single lamella":
+    if choice == "Single twin lamella":
         etas[0][:] = 1.0
         etas[1][:, mid-tw//2:mid+tw//2] = 1.0
-    elif choice == "Random":
+    elif choice == "Multiple twins":
+        etas[0][:] = 1.0
+        etas[1][:, mid-2*tw//2:mid-tw//2] = 1.0
+        etas[1][:, mid+tw//2:mid+2*tw//2] = 1.0
+    else:  # Random
         rnd = np.random.rand(N,N)
-        mask0 = rnd < 0.4
-        mask1 = (rnd >= 0.4) & (rnd < 0.7)
-        mask2 = rnd >= 0.7
-        etas[0][mask0] = 1.0
-        etas[1][mask1] = 1.0
-        etas[2][mask2] = 1.0
-    else:  # Vortex
-        x, y = np.meshgrid(np.arange(N), np.arange(N))
-        angle = np.arctan2(y - N/2, x - N/2)
-        etas[0] = 0.5 * (1 + np.cos(4 * angle))
-        etas[1] = 0.5 * (1 + np.sin(4 * angle))
+        etas[0][rnd < 0.5] = 1.0
+        etas[1][rnd >= 0.5] = 1.0
 
     total = np.sum(etas, axis=0)
     for i in range(p):
@@ -150,7 +132,7 @@ def init_structure(choice):
     return etas
 
 # ==================================== RUN SIMULATION ====================================
-if st.button("Run Twin Evolution + Full Stress/Strain Analysis", type="primary"):
+if st.button("Run Nanotwin Evolution + Stress Analysis", type="primary"):
     etas = init_structure(init)
 
     progress = st.progress(0)
@@ -167,9 +149,8 @@ if st.button("Run Twin Evolution + Full Stress/Strain Analysis", type="primary")
                 df_elas[i] = -(s11 * ε00[i][0,0] + s22 * ε00[i][1,1] + 2 * s12 * ε00[i][0,1])
 
             for i in range(p):
-                df = df_chem[i] - w * laps[i] + df_elas[i]
-                delta = dt * mobility * df * etas[i]**2 * (1 - etas[i])**2
-                etas[i] += delta
+                df = df_chem[i] - kappa * laps[i] + df_elas[i]
+                etas[i] += dt * mobility * df * etas[i]**2 * (1 - etas[i])**2
                 etas[i] = np.clip(etas[i], 0, 1)
 
             total = np.sum(etas, axis=0)
@@ -179,98 +160,71 @@ if st.button("Run Twin Evolution + Full Stress/Strain Analysis", type="primary")
         if step % max(1, steps//50) == 0 or step == steps:
             progress.progress((step + 1) / (steps + 1))
 
-            fig = plt.figure(figsize=(20, 10))
-            gs = fig.add_gridspec(2, 4, hspace=0.3, wspace=0.4)
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
 
-            ax1 = fig.add_subplot(gs[0, :2])
-            rgb = np.stack([etas[0], etas[1], etas[2]], axis=-1)
-            ax1.imshow(rgb, origin='lower', extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
-            ax1.set_title(f"Tetragonal Twins – Step {step}", fontsize=18, fontweight='bold')
+            # Twins (gray for matrix, red for twin)
+            ax1 = axes[0]
+            img = np.zeros((N,N))
+            img += 0.5 * etas[0] + etas[1]
+            ax1.imshow(img, cmap='Reds', origin='lower', extent=extent, vmin=0, vmax=1)
+            ax1.set_title(f"Twin Structure (Step {step})")
             ax1.set_xlabel("x (nm)"); ax1.set_ylabel("y (nm)")
 
-            ax2 = fig.add_subplot(gs[0, 2])
-            im2 = ax2.imshow(vm, cmap='hot', vmin=0, vmax=2, origin='lower',
-                            extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
+            # von Mises
+            ax2 = axes[1]
+            ax2.imshow(vm, cmap='hot', origin='lower', extent=extent, vmin=0, vmax=np.percentile(vm, 99))
             ax2.set_title("von Mises Stress (GPa)")
-            plt.colorbar(im2, ax=ax2, shrink=0.8)
 
-            ax3 = fig.add_subplot(gs[0, 3])
-            im3 = ax3.imshow(hydro, cmap='coolwarm', vmin=-0.8, vmax=0.8, origin='lower',
-                            extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
+            # Hydrostatic
+            ax3 = axes[2]
+            ax3.imshow(hydro, cmap='coolwarm', origin='lower', extent=extent, symmetric=True)
             ax3.set_title("Hydrostatic Stress (GPa)")
-            plt.colorbar(im3, ax=ax3, shrink=0.8)
-
-            ax4 = fig.add_subplot(gs[1, :2])
-            im4 = ax4.imshow(s11, cmap='RdBu_r', vmin=-1.5, vmax=1.5, origin='lower',
-                            extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
-            ax4.set_title("σ$_{xx}$ (GPa)")
-            plt.colorbar(im4, ax=ax4, shrink=0.8)
-
-            ax5 = fig.add_subplot(gs[1, 2])
-            im5 = ax5.imshow(s22, cmap='RdBu_r', vmin=-1.5, vmax=1.5, origin='lower',
-                            extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
-            ax5.set_title("σ$_{yy}$ (GPa)")
-            plt.colorbar(im5, ax=ax5, shrink=0.8)
-
-            ax6 = fig.add_subplot(gs[1, 3])
-            im6 = ax6.imshow(s12, cmap='PRGn', vmin=-0.5, vmax=0.5, origin='lower',
-                            extent=[-N*dx/2, N*dx/2, -N*dx/2, N*dx/2])
-            ax6.set_title("σ$_{xy}$ (GPa)")
-            plt.colorbar(im6, ax=ax6, shrink=0.8)
-
-            for ax in fig.axes:
-                ax.tick_params(direction='in', top=True, right=True)
-                for spine in ax.spines.values():
-                    spine.set_linewidth(1.2)
 
             placeholder.pyplot(fig)
             plt.close(fig)
 
-    st.success("Simulation complete! Twins + full stress/strain fields generated.")
+    st.success("Simplified nanotwin evolution complete!")
 
-    # Final results with download
+    # Final downloads
     col1, col2, col3 = st.columns(3)
     with col1:
-        fig1, ax1 = plt.subplots()
-        ax1.imshow(np.stack(etas, axis=-1), origin='lower')
-        ax1.set_title("Final Twin Structure")
+        fig1 = plt.figure()
+        plt.imshow(np.zeros((N,N)) + 0.5 * etas[0] + etas[1], cmap='Reds', vmin=0, vmax=1)
+        plt.title("Final Twins")
         st.pyplot(fig1)
         buf = BytesIO()
-        fig1.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        fig1.savefig(buf, format='png')
         buf.seek(0)
-        st.download_button("Download Twins PNG", buf, "twins_final.png", "image/png")
+        st.download_button("Download Twins PNG", buf, "twins.png")
 
     with col2:
-        fig2, ax2 = plt.subplots()
-        im = ax2.imshow(vm, cmap='hot', origin='lower')
-        plt.colorbar(im, label='von Mises (GPa)')
-        ax2.set_title("von Mises Stress")
+        fig2 = plt.figure()
+        plt.imshow(vm, cmap='hot')
+        plt.title("Final von Mises")
         st.pyplot(fig2)
         buf2 = BytesIO()
-        fig2.savefig(buf2, format='png', dpi=300, bbox_inches='tight')
+        fig2.savefig(buf2, format='png')
         buf2.seek(0)
-        st.download_button("Download von Mises", buf2, "von_mises.png", "image/png")
+        st.download_button("Download von Mises PNG", buf2, "vm.png")
 
     with col3:
-        fig3, ax3 = plt.subplots()
-        im = ax3.imshow(hydro, cmap='coolwarm', vmin=-0.8, vmax=0.8, origin='lower')
-        plt.colorbar(im, label='Hydrostatic (GPa)')
-        ax3.set_title("Hydrostatic Stress")
+        fig3 = plt.figure()
+        plt.imshow(hydro, cmap='coolwarm')
+        plt.title("Final Hydrostatic")
         st.pyplot(fig3)
         buf3 = BytesIO()
-        fig3.savefig(buf3, format='png', dpi=300, bbox_inches='tight')
+        fig3.savefig(buf3, format='png')
         buf3.seek(0)
-        st.download_button("Download Hydrostatic", buf3, "hydrostatic.png", "image/png")
+        st.download_button("Download Hydrostatic PNG", buf3, "hydro.png")
 
-    # Export all data as ZIP
+    # ZIP export
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         for i in range(p):
-            np.savetxt(f"eta_{i}.csv", etas[i], delimiter=",")
-            zf.writestr(f"eta_{i}.csv", BytesIO(np.savetxt(..., etas[i], delimiter=",")).getvalue())
-        zf.writestr("von_mises.csv", BytesIO(np.savetxt(..., vm, delimiter=",")).getvalue())
-        zf.writestr("hydrostatic.csv", BytesIO(np.savetxt(..., hydro, delimiter=",")).getvalue())
+            pd.DataFrame(etas[i]).to_csv(BytesIO(), index=False)
+            zf.writestr(f"eta_{i}.csv", BytesIO(pd.DataFrame(etas[i]).to_csv(index=False)).getvalue())
+        zf.writestr("von_mises.csv", BytesIO(pd.DataFrame(vm).to_csv(index=False)).getvalue())
+        zf.writestr("hydrostatic.csv", BytesIO(pd.DataFrame(hydro).to_csv(index=False)).getvalue())
     buffer.seek(0)
-    st.download_button("Download All Data (ZIP)", buffer, f"BaTiO3_twins_{datetime.now().strftime('%H%M')}.zip")
-
-st.balloons()
+    st.download_button("Download All Data ZIP", buffer, "nanotwin_ag.zip")
