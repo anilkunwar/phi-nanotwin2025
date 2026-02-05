@@ -1,11 +1,16 @@
-scipy==1.13.0
-numpy==1.26.4
-streamlit==1.35.0
-rich==13.9.4
-matplotlib==3.8.3
-plotly==5.18.0
-pyvista==0.44.0
-pyyaml==6.0.1
-numba
+numpy
+pyvista
+pyyaml
 pyfftw
 mpi4py
+streamlit
+matplotlib
+scipy
+plotly
+pyvista
+numba
+meshio
+cupy-cuda12x  # For CUDA 11.x pip install cupy-cuda11x
+imageio
+imageio-ffmpeg
+seaborn
