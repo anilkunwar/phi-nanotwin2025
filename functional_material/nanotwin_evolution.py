@@ -42,6 +42,10 @@ extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
 X, Y = np.meshgrid(np.linspace(extent[0], extent[1], N),
                    np.linspace(extent[2], extent[3], N))
 
+# Define constants for Numba compatibility
+w = 1.0  # Interfacial energy coefficient
+p = 3  # Number of phases: 2 grains + 1 twin variant
+
 # =============================================
 # EXPANDED COLORMAP LIBRARY (50+ options)
 # =============================================
@@ -757,7 +761,445 @@ class SimulationDB:
         return simulations
 
 # =============================================
-# SIDEBAR - Global Settings (Available in Both Modes)
+# MULTI-ORDER PARAMETER PHASE FIELD MODEL
+# =============================================
+
+# Eigenstrain tensors
+ε00 = [
+    np.zeros((2,2)),  # Grain 1
+    np.array([[0.0, 0.707], [0.707, 0.0]]) / np.sqrt(2),  # Twin
+    np.zeros((2,2))   # Grain 2
+]
+
+@njit(parallel=True)
+def compute_gradient(eta, dx):
+    """Compute gradient using central finite differences"""
+    n = eta.shape[0]
+    gx = np.zeros((n, n))
+    gy = np.zeros((n, n))
+    for i in prange(1, n-1):
+        for j in prange(1, n-1):
+            gx[i,j] = (eta[i+1,j] - eta[i-1,j]) / (2*dx)
+            gy[i,j] = (eta[i,j+1] - eta[i,j-1]) / (2*dx)
+    return gx, gy
+
+@njit(parallel=True)
+def compute_laplacian(eta, dx):
+    """Compute Laplacian using central finite differences"""
+    n = eta.shape[0]
+    lap = np.zeros((n, n))
+    for i in prange(1, n-1):
+        for j in prange(1, n-1):
+            lap[i,j] = (eta[i+1,j] + eta[i-1,j] + eta[i,j+1] + eta[i,j-1] - 4*eta[i,j]) / (dx*dx)
+    return lap
+
+@njit
+def local_free_energy_deriv(etas, gamma_ij):
+    """Compute derivative of local free energy density"""
+    p = len(etas)
+    n = etas[0].shape[0]
+    df = np.zeros((p, n, n))
+    
+    for i in range(p):
+        eta_i = etas[i]
+        e2 = eta_i * eta_i
+        e3 = eta_i * e2
+        e4 = e2 * e2
+        df[i] = e4 - 1.5 * e2 + 0.5 * e3  # Modified double-well
+        
+        for j in range(p):
+            if i != j:
+                df[i] += gamma_ij[i,j] * eta_i * etas[j] * etas[j]
+    
+    return df
+
+@njit(parallel=False)  # Disable parallel for nested loops to avoid Numba issues
+def evolve_multi_phase(etas, kappa, gamma_ij, dt, dx, N):
+    """Evolve multiple phases with proper typing"""
+    # Create new list for results
+    new_etas = []
+    for i in range(len(etas)):
+        new_etas.append(etas[i].copy())
+    
+    # Compute local free energy derivatives
+    df_list = local_free_energy_deriv(etas, gamma_ij)
+    
+    # Evolve each phase
+    for i in range(len(etas)):
+        eta = etas[i]
+        df = df_list[i]
+        
+        # Compute gradient and laplacian
+        lap = compute_laplacian(eta, dx)
+        
+        # Update using explicit Euler
+        for x in range(1, N-1):
+            for y in range(1, N-1):
+                L = 1.0  # Isotropic mobility
+                new_etas[i][x, y] = eta[x, y] + dt * L * (-df[x, y] + kappa * lap[x, y])
+                # Clip to reasonable values
+                if new_etas[i][x, y] < 0:
+                    new_etas[i][x, y] = 0
+                if new_etas[i][x, y] > 1:
+                    new_etas[i][x, y] = 1
+    
+    # Normalize
+    total = np.zeros((N, N))
+    for i in range(len(new_etas)):
+        total += new_etas[i]
+    
+    for i in range(len(new_etas)):
+        # Avoid division by zero
+        for x in range(N):
+            for y in range(N):
+                if total[x, y] > 0:
+                    new_etas[i][x, y] /= total[x, y]
+    
+    return new_etas
+
+def compute_stress_strain(etas, dx):
+    """Compute stress and strain fields using FFT spectral method"""
+    nx = etas[0].shape[0]
+    kx = 2*np.pi * np.fft.fftfreq(nx, d=dx)
+    ky = 2*np.pi * np.fft.fftfreq(nx, d=dx)
+    KX, KY = np.meshgrid(kx, ky, indexing='ij')
+    K2 = KX**2 + KY**2
+    K2[0,0] = 1e-12
+
+    # Total eigenstrain
+    e11 = np.zeros((nx,nx))
+    e22 = np.zeros((nx,nx))
+    e12 = np.zeros((nx,nx))
+    for i in range(p):
+        e11 += etas[i] * ε00[i][0,0]
+        e22 += etas[i] * ε00[i][1,1]
+        e12 += etas[i] * ε00[i][0,1]
+
+    e11h = fftn(e11)
+    e22h = fftn(e22)
+    e12h = fftn(e12)
+
+    # Plane-strain reduced constants (Pa)
+    C11_p = (C11 - C12**2 / C11) * 1e9
+    C12_p = (C12 - C12**2 / C11) * 1e9
+    C44_p = C44 * 1e9
+
+    n1 = KX / np.sqrt(K2)
+    n2 = KY / np.sqrt(K2)
+
+    # Acoustic tensor
+    A11 = C11_p * n1**2 + C44_p * n2**2
+    A22 = C11_p * n2**2 + C44_p * n1**2
+    A12 = (C12_p + C44_p) * n1 * n2
+
+    det = A11 * A22 - A12**2
+    G11 = A22 / det
+    G22 = A11 / det
+    G12 = -A12 / det
+
+    # Tau = C : e
+    tau_xx = C11_p * e11 + C12_p * e22
+    tau_yy = C12_p * e11 + C11_p * e22
+    tau_xy = 2 * C44_p * e12
+
+    tau_xxh = fftn(tau_xx)
+    tau_yyh = fftn(tau_yy)
+    tau_xyh = fftn(tau_xy)
+
+    Sx = KX * tau_xxh + KY * tau_xyh
+    Sy = KX * tau_xyh + KY * tau_yyh
+
+    ux_h = -1j * (G11 * Sx + G12 * Sy)
+    uy_h = -1j * (G12 * Sx + G22 * Sy)
+
+    ux = np.real(ifftn(ux_h))
+    uy = np.real(ifftn(uy_h))
+
+    exx = np.real(ifftn(1j * KX * ux_h))
+    eyy = np.real(ifftn(1j * KY * uy_h))
+    exy = 0.5 * np.real(ifftn(1j * (KX * uy_h + KY * ux_h)))
+
+    sxx = (C11_p * exx + C12_p * eyy) / 1e9
+    syy = (C12_p * exx + C11_p * eyy) / 1e9
+    sxy = 2 * C44_p * exy / 1e9
+    szz = (C12 / (C11 + C12)) * (sxx + syy) # Plane strain approx
+
+    sigma_mag = np.sqrt(sxx**2 + syy**2 + 2*sxy**2)
+    sigma_hydro = (sxx + syy) / 2
+    von_mises = np.sqrt(0.5 * ((sxx-syy)**2 + (syy-szz)**2 + (szz-sxx)**2 + 6*sxy**2))
+
+    return sxx, syy, sxy, sigma_hydro, von_mises
+
+def create_initial_etas(shape, defect_type):
+    """Create initial multi-order parameter field"""
+    etas = [np.zeros((N, N)) for _ in range(p)]
+    cx, cy = N//2, N//2
+    w, h = (24, 12) if shape in ["Rectangle", "Horizontal Fault"] else (16, 16)
+   
+    if shape == "Square":
+        etas[1][cy-h:cy+h, cx-h:cx+h] = 1.0
+        etas[0][:] = 1.0 - etas[1]
+    elif shape == "Horizontal Fault":
+        etas[1][cy-4:cy+4, cx-w:cx+w] = 1.0
+        etas[0][:] = 1.0 - etas[1]
+    elif shape == "Vertical Fault":
+        etas[1][cy-w:cy+w, cx-4:cx+4] = 1.0
+        etas[0][:] = 1.0 - etas[1]
+    elif shape == "Rectangle":
+        etas[1][cy-h:cy+h, cx-w:cx+w] = 1.0
+        etas[0][:] = 1.0 - etas[1]
+    elif shape == "Ellipse":
+        mask = ((X/(w*1.5))**2 + (Y/(h*1.5))**2) <= 1
+        etas[1][mask] = 1.0
+        etas[0][:] = 1.0 - etas[1]
+   
+    # Add noise
+    for eta in etas:
+        eta += 0.02 * np.random.randn(N, N)
+        eta = np.clip(eta, 0.0, 1.0)
+    
+    # Normalize
+    total = np.sum(etas, axis=0)
+    for i in range(p):
+        etas[i] /= (total + 1e-12)
+    return etas
+
+def run_simulation_multi(sim_params):
+    """Run simulation with proper Numba compatibility"""
+    # Extract parameters
+    kappa = sim_params['kappa']
+    steps = sim_params['steps']
+    save_every = sim_params['save_every']
+    shape = sim_params['shape']
+    defect_type = sim_params['defect_type']
+    
+    # Initialize gamma_ij matrix
+    gamma_ij = np.ones((p, p)) * w
+    np.fill_diagonal(gamma_ij, 0)
+    
+    # Create initial etas
+    etas = create_initial_etas(shape, defect_type)
+    
+    history = []
+    dt = 0.004  # Time step
+    
+    for step in range(steps + 1):
+        if step > 0:
+            # Evolve phases
+            etas = evolve_multi_phase(etas, kappa, gamma_ij, dt, dx, N)
+        
+        if step % save_every == 0 or step == steps:
+            # Compute stress
+            sxx, syy, sxy, hydro, vm = compute_stress_strain(etas, dx)
+            stress_fields = {
+                'sxx': sxx, 
+                'syy': syy, 
+                'sxy': sxy, 
+                'sigma_hydro': hydro, 
+                'von_mises': vm,
+                'sigma_mag': np.sqrt(sxx**2 + syy**2 + 2*sxy**2)
+            }
+            # Create copies to avoid reference issues
+            eta_copy = [eta.copy() for eta in etas]
+            history.append((eta_copy, stress_fields))
+    
+    return history
+
+# =============================================
+# COMPARISON PLOTTING FUNCTIONS
+# =============================================
+
+def create_enhanced_comparison_plot(simulations, frames, config, styling):
+    """Create publication-quality comparison plot"""
+    n_sims = len(simulations)
+    cols = min(2, n_sims)
+    rows = (n_sims + cols - 1) // cols
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(8*cols, 6*rows))
+    
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    elif cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for idx, (sim, frame) in enumerate(zip(simulations, frames)):
+        row = idx // cols
+        col = idx % cols
+        ax = axes[row, col]
+        
+        # Get data
+        etas, stress_fields = sim['history'][frame]
+        
+        # Determine which stress component to show
+        stress_key = config['stress_component']
+        if stress_key == "Stress Magnitude |σ|":
+            stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+        elif stress_key == "Hydrostatic σ_h":
+            stress_data = stress_fields['sigma_hydro']
+        else:  # von Mises σ_vM
+            stress_data = stress_fields['von_mises']
+        
+        # Create heatmap
+        im = ax.imshow(stress_data, extent=extent,
+                      cmap=plt.cm.get_cmap(COLORMAPS.get(sim['params'].get('sigma_cmap', 'viridis'), 'viridis')),
+                      origin='lower', aspect='auto')
+        
+        ax.set_title(f"{sim['params']['defect_type']}\n{sim['params']['orientation']}")
+        ax.set_xlabel("x (nm)")
+        ax.set_ylabel("y (nm)")
+        
+        # Add colorbar
+        plt.colorbar(im, ax=ax, shrink=0.8, label='Stress (GPa)')
+    
+    # Hide empty subplots
+    for idx in range(n_sims, rows*cols):
+        row = idx // cols
+        col = idx % cols
+        axes[row, col].axis('off')
+    
+    # Apply styling
+    fig = EnhancedFigureStyler.apply_advanced_styling(fig, axes, styling)
+    
+    # Add overall title
+    fig.suptitle(f"{config['stress_component']} Comparison", fontsize=16, fontweight='bold')
+    
+    return fig
+
+def create_stress_cross_correlation_plot(simulations, frames, config, styling):
+    """Create stress cross-correlation plot"""
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    colors = plt.cm.rainbow(np.linspace(0, 1, len(simulations)))
+    
+    for idx, (sim, frame, color) in enumerate(zip(simulations, frames, colors)):
+        etas, stress_fields = sim['history'][frame]
+        
+        # Get data based on config
+        if config['correlation_x'] == "Defect Parameter η":
+            x_data = np.sum(etas, axis=0).flatten()
+        else:
+            x_key = config['correlation_x'].lower()
+            if 'hydro' in x_key:
+                x_data = stress_fields['sigma_hydro'].flatten()
+            elif 'von mises' in x_key.lower():
+                x_data = stress_fields['von_mises'].flatten()
+            else:
+                x_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2).flatten()
+        
+        if 'hydro' in config['correlation_y'].lower():
+            y_data = stress_fields['sigma_hydro'].flatten()
+        elif 'von mises' in config['correlation_y'].lower():
+            y_data = stress_fields['von_mises'].flatten()
+        else:
+            y_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2).flatten()
+        
+        # Sample data if needed
+        sample_size = min(len(x_data), int(len(x_data) * config.get('correlation_sample', 0.2)))
+        indices = np.random.choice(len(x_data), sample_size, replace=False)
+        
+        ax.scatter(x_data[indices], y_data[indices], 
+                  alpha=config.get('correlation_alpha', 0.5),
+                  s=config.get('correlation_point_size', 10),
+                  color=color,
+                  label=f"{sim['params']['defect_type']} - {sim['params']['orientation']}")
+    
+    ax.set_xlabel(config['correlation_x'])
+    ax.set_ylabel(config['correlation_y'])
+    ax.set_title("Stress Component Cross-Correlation")
+    ax.legend()
+    
+    fig = EnhancedFigureStyler.apply_advanced_styling(fig, ax, styling)
+    return fig
+
+def create_evolution_timeline_plot(simulations, config, styling):
+    """Create evolution timeline comparison plot"""
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    colors = plt.cm.rainbow(np.linspace(0, 1, len(simulations)))
+    
+    for idx, (sim, color) in enumerate(zip(simulations, colors)):
+        history = sim['history']
+        times = np.arange(len(history))
+        
+        # Extract stress evolution at center point
+        center_stress = []
+        for etas, stress_fields in history:
+            if config['stress_component'] == "Stress Magnitude |σ|":
+                stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+            elif config['stress_component'] == "Hydrostatic σ_h":
+                stress_data = stress_fields['sigma_hydro']
+            else:  # von Mises σ_vM
+                stress_data = stress_fields['von_mises']
+            center_stress.append(stress_data[N//2, N//2])
+        
+        ax.plot(times, center_stress, color=color,
+                linewidth=styling.get('line_width', 2.0),
+                linestyle=config.get('line_style', 'solid'),
+                label=f"{sim['params']['defect_type']} - {sim['params']['orientation']}")
+    
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel(f"{config['stress_component']} at Center (GPa)")
+    ax.set_title("Stress Evolution Timeline")
+    ax.legend()
+    
+    fig = EnhancedFigureStyler.apply_advanced_styling(fig, ax, styling)
+    return fig
+
+def create_contour_comparison_plot(simulations, frames, config, styling):
+    """Create contour comparison plot"""
+    n_sims = len(simulations)
+    cols = min(2, n_sims)
+    rows = (n_sims + cols - 1) // cols
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(8*cols, 6*rows))
+    
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    elif cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for idx, (sim, frame) in enumerate(zip(simulations, frames)):
+        row = idx // cols
+        col = idx % cols
+        ax = axes[row, col]
+        
+        etas, stress_fields = sim['history'][frame]
+        
+        # Get stress data
+        if config['stress_component'] == "Stress Magnitude |σ|":
+            stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+        elif config['stress_component'] == "Hydrostatic σ_h":
+            stress_data = stress_fields['sigma_hydro']
+        else:  # von Mises σ_vM
+            stress_data = stress_fields['von_mises']
+        
+        # Create contour plot
+        contour = ax.contour(stress_data, 
+                           levels=config.get('contour_levels', 10),
+                           extent=extent,
+                           linewidths=config.get('contour_linewidth', 1.5),
+                           cmap=plt.cm.get_cmap(COLORMAPS.get(sim['params'].get('sigma_cmap', 'viridis'), 'viridis')))
+        
+        ax.clabel(contour, inline=True, fontsize=8)
+        ax.set_title(f"{sim['params']['defect_type']} - {sim['params']['orientation']}")
+        ax.set_xlabel("x (nm)")
+        ax.set_ylabel("y (nm)")
+    
+    # Hide empty subplots
+    for idx in range(n_sims, rows*cols):
+        row = idx // cols
+        col = idx % cols
+        axes[row, col].axis('off')
+    
+    fig = EnhancedFigureStyler.apply_advanced_styling(fig, axes, styling)
+    return fig
+
+# =============================================
+# SIDEBAR - Global Settings
 # =============================================
 st.sidebar.header("🎨 Global Chart Styling")
 # Get enhanced publication controls
@@ -1000,191 +1442,6 @@ else:  # Compare Saved Simulations
                 })
 
 # =============================================
-# MULTI-ORDER PARAMETER PHASE FIELD MODEL (SHEN & BEYERLEIN INSPIRED)
-# =============================================
-p = 3  # Number of phases: 2 grains + 1 twin variant (simplified for nanotwin)
-
-@njit(parallel=True)
-def compute_gradient(eta, dx):
-    n = eta.shape[0]
-    gx = np.zeros((n, n))
-    gy = np.zeros((n, n))
-    for i in prange(1, n-1):
-        for j in prange(1, n-1):
-            gx[i,j] = (eta[i+1,j] - eta[i-1,j]) / (2*dx)
-            gy[i,j] = (eta[i,j+1] - eta[i,j-1]) / (2*dx)
-    return gx, gy
-
-@njit
-def local_free_energy_deriv(etas, gamma_ij):
-    n = etas[0].shape[0]
-    df = np.zeros((p, n, n))
-    for i in range(p):
-        e2 = etas[i]**2
-        e3 = etas[i]**3
-        e4 = e2**2
-        df[i] += e4 - 1.5*e2 + 0.5*e3  # Modified double-well for stability
-        for j in range(p):
-            if i != j:
-                df[i] += gamma_ij[i,j] * etas[i] * etas[j]**2
-    return df
-
-@njit(parallel=True)
-def evolve_multi_phase(etas, kappa, gamma_ij, dt, dx, N):
-    new_etas = [eta.copy() for eta in etas]
-    for i in range(p):
-        gx, gy = compute_gradient(etas[i], dx)
-        lap = compute_laplacian(etas[i], dx)
-        df = local_free_energy_deriv(etas, gamma_ij)[i]
-        # Simplified variational without inclination mobility
-        for x in prange(N):
-            for y in prange(N):
-                L = 1.0  # Isotropic mobility
-                new_etas[i][x,y] += dt * L * (-df[x,y] + kappa * lap[x,y])
-                new_etas[i][x,y] = np.clip(new_etas[i][x,y], 0, 1)
-    # Normalize
-    total = np.zeros((N,N))
-    for eta in new_etas:
-        total += eta
-    for i in range(p):
-        new_etas[i] /= (total + 1e-12)
-    return new_etas
-
-# =============================================
-# ELASTIC SOLVER
-# =============================================
-ε00 = [
-    np.zeros((2,2)),  # Grain 1
-    np.array([[0.0, 0.707], [0.707, 0.0]]) / np.sqrt(2),  # Twin
-    np.zeros((2,2))   # Grain 2
-]
-
-def compute_stress_strain(etas, dx):
-    nx = etas[0].shape[0]
-    kx = 2*np.pi * np.fft.fftfreq(nx, d=dx)
-    ky = 2*np.pi * np.fft.fftfreq(nx, d=dx)
-    KX, KY = np.meshgrid(kx, ky, indexing='ij')
-    K2 = KX**2 + KY**2
-    K2[0,0] = 1e-12
-
-    # Total eigenstrain
-    e11 = np.zeros((nx,nx))
-    e22 = np.zeros((nx,nx))
-    e12 = np.zeros((nx,nx))
-    for i in range(p):
-        e11 += etas[i] * ε00[i][0,0]
-        e22 += etas[i] * ε00[i][1,1]
-        e12 += etas[i] * ε00[i][0,1]
-
-    e11h = fftn(e11)
-    e22h = fftn(e22)
-    e12h = fftn(e12)
-
-    # Plane-strain reduced constants (Pa)
-    C11_p = (C11 - C12**2 / C11) * 1e9
-    C12_p = (C12 - C12**2 / C11) * 1e9
-    C44_p = C44 * 1e9
-
-    n1 = KX / np.sqrt(K2)
-    n2 = KY / np.sqrt(K2)
-
-    # Acoustic tensor
-    A11 = C11_p * n1**2 + C44_p * n2**2
-    A22 = C11_p * n2**2 + C44_p * n1**2
-    A12 = (C12_p + C44_p) * n1 * n2
-
-    det = A11 * A22 - A12**2
-    G11 = A22 / det
-    G22 = A11 / det
-    G12 = -A12 / det
-
-    # Tau = C : e
-    tau_xx = C11_p * e11 + C12_p * e22
-    tau_yy = C12_p * e11 + C11_p * e22
-    tau_xy = 2 * C44_p * e12
-
-    tau_xxh = fftn(tau_xx)
-    tau_yyh = fftn(tau_yy)
-    tau_xyh = fftn(tau_xy)
-
-    Sx = KX * tau_xxh + KY * tau_xyh
-    Sy = KX * tau_xyh + KY * tau_yyh
-
-    ux_h = -1j * (G11 * Sx + G12 * Sy)
-    uy_h = -1j * (G12 * Sx + G22 * Sy)
-
-    ux = np.real(ifftn(ux_h))
-    uy = np.real(ifftn(uy_h))
-
-    exx = np.real(ifftn(1j * KX * ux_h))
-    eyy = np.real(ifftn(1j * KY * uy_h))
-    exy = 0.5 * np.real(ifftn(1j * (KX * uy_h + KY * ux_h)))
-
-    sxx = (C11_p * exx + C12_p * eyy) / 1e9
-    syy = (C12_p * exx + C11_p * eyy) / 1e9
-    sxy = 2 * C44_p * exy / 1e9
-    szz = (C12 / (C11 + C12)) * (sxx + syy) # Plane strain approx
-
-    sigma_mag = np.sqrt(sxx**2 + syy**2 + 2*sxy**2)
-    sigma_hydro = (sxx + syy) / 2
-    von_mises = np.sqrt(0.5 * ((sxx-syy)**2 + (syy-szz)**2 + (szz-sxx)**2 + 6*sxy**2))
-
-    return sxx, syy, sxy, sigma_hydro, von_mises
-
-# =============================================
-# SIMULATION ENGINE (Multi-Order Parameter)
-# =============================================
-def create_initial_etas(shape, defect_type):
-    etas = [np.zeros((N, N)) for _ in range(p)]
-    cx, cy = N//2, N//2
-    w, h = (24, 12) if shape in ["Rectangle", "Horizontal Fault"] else (16, 16)
-   
-    if shape == "Square":
-        etas[1][cy-h:cy+h, cx-h:cx+h] = 1.0
-        etas[0][:] = 1.0 - etas[1]
-    elif shape == "Horizontal Fault":
-        etas[1][cy-4:cy+4, cx-w:cx+w] = 1.0
-        etas[0][:] = 1.0 - etas[1]
-    elif shape == "Vertical Fault":
-        etas[1][cy-w:cy+w, cx-4:cx+4] = 1.0
-        etas[0][:] = 1.0 - etas[1]
-    elif shape == "Rectangle":
-        etas[1][cy-h:cy+h, cx-w:cx+w] = 1.0
-        etas[0][:] = 1.0 - etas[1]
-    elif shape == "Ellipse":
-        mask = ((X/(w*1.5))**2 + (Y/(h*1.5))**2) <= 1
-        etas[1][mask] = 1.0
-        etas[0][:] = 1.0 - etas[1]
-   
-    # Add noise
-    for eta in etas:
-        eta += 0.02 * np.random.randn(N, N)
-        eta = np.clip(eta, 0.0, 1.0)
-    
-    # Normalize
-    total = np.sum(etas, axis=0)
-    for i in range(p):
-        etas[i] /= (total + 1e-12)
-    return etas
-
-@njit(parallel=True)
-def run_simulation_multi(sim_params):
-    gamma_ij = np.ones((p,p)) * w  # Isotropic gamma
-    np.fill_diagonal(gamma_ij, 0)
-
-    etas = create_initial_etas(sim_params['shape'], sim_params['defect_type'])
-    
-    history = []
-    for step in range(sim_params['steps'] + 1):
-        if step > 0:
-            etas = evolve_multi_phase(etas, sim_params['kappa'], gamma_ij, dt=0.004, dx=dx, N=N)
-        if step % sim_params['save_every'] == 0 or step == sim_params['steps']:
-            sxx, syy, sxy, hydro, vm = compute_stress_strain(etas, dx)
-            stress_fields = {'sxx': sxx, 'syy': syy, 'sxy': sxy, 'sigma_hydro': hydro, 'von_mises': vm}
-            history.append((etas.copy(), stress_fields))
-    return history
-
-# =============================================
 # MAIN CONTENT AREA
 # =============================================
 if operation_mode == "Run New Simulation":
@@ -1392,11 +1649,9 @@ else: # COMPARE SAVED SIMULATIONS
                 "Hydrostatic σ_h": 'sigma_hydro',
                 "von Mises σ_vM": 'von_mises'
             }
-            stress_key = stress_map[config['stress_component']]
            
             # Create comparison based on type
-            if config['type'] in ["Side-by-Side Heatmaps", "Overlay Line Profiles",
-                                 "Statistical Summary", "Defect-Stress Correlation"]:
+            if config['type'] in ["Side-by-Side Heatmaps", "Statistical Summary", "Defect-Stress Correlation"]:
                 # Use enhanced publication-quality plotting
                 st.subheader(f"📰 Publication-Quality {config['type']}")
                
@@ -1431,7 +1686,15 @@ else: # COMPARE SAVED SIMULATIONS
                         for idx, (sim, frame) in enumerate(zip(simulations, frames)):
                             etas, stress_fields = sim['history'][frame]
                             eta_data = np.sum(etas, axis=0).flatten()  # Total η for defect
-                            stress_data = stress_fields[stress_key].flatten()
+                            
+                            # Get stress data
+                            if config['stress_component'] == "Stress Magnitude |σ|":
+                                stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2).flatten()
+                            elif config['stress_component'] == "Hydrostatic σ_h":
+                                stress_data = stress_fields['sigma_hydro'].flatten()
+                            else:
+                                stress_data = stress_fields['von_mises'].flatten()
+                            
                             stress_data = stress_data[np.isfinite(stress_data)]
                            
                             stats_data.append({
@@ -1471,7 +1734,14 @@ else: # COMPARE SAVED SIMULATIONS
                 for idx, (sim, frame, color) in enumerate(zip(simulations, frames, colors)):
                     # Get data
                     etas, stress_fields = sim['history'][frame]
-                    stress_data = stress_fields[stress_key]
+                    
+                    # Get stress data
+                    if config['stress_component'] == "Stress Magnitude |σ|":
+                        stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+                    elif config['stress_component'] == "Hydrostatic σ_h":
+                        stress_data = stress_fields['sigma_hydro']
+                    else:
+                        stress_data = stress_fields['von_mises']
                    
                     # Extract slice
                     stress_slice = stress_data[slice_pos, :]
@@ -1515,7 +1785,14 @@ else: # COMPARE SAVED SIMULATIONS
                 for idx, (sim, frame, color) in enumerate(zip(simulations, frames, colors)):
                     # Get data
                     etas, stress_fields = sim['history'][frame]
-                    stress_data = stress_fields[stress_key]
+                    
+                    # Get stress data
+                    if config['stress_component'] == "Stress Magnitude |σ|":
+                        stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+                    elif config['stress_component'] == "Hydrostatic σ_h":
+                        stress_data = stress_fields['sigma_hydro']
+                    else:
+                        stress_data = stress_fields['von_mises']
                    
                     # Calculate radial profile
                     r = np.sqrt(X**2 + Y**2)
@@ -1586,11 +1863,18 @@ else: # COMPARE SAVED SIMULATIONS
                    
                     # Get data
                     etas, stress_fields = sim['history'][frame]
-                    stress_data = stress_fields[stress_key]
+                    
+                    # Get stress data
+                    if config['stress_component'] == "Stress Magnitude |σ|":
+                        stress_data = np.sqrt(stress_fields['sxx']**2 + stress_fields['syy']**2 + 2*stress_fields['sxy']**2)
+                    elif config['stress_component'] == "Hydrostatic σ_h":
+                        stress_data = stress_fields['sigma_hydro']
+                    else:
+                        stress_data = stress_fields['von_mises']
                    
                     # Create surface plot (simplified 2D)
                     im = ax.imshow(stress_data, extent=extent,
-                                  cmap=plt.cm.get_cmap(COLORMAPS.get(sim['params']['sigma_cmap'], 'viridis')),
+                                  cmap=plt.cm.get_cmap(COLORMAPS.get(sim['params'].get('sigma_cmap', 'viridis'), 'viridis')),
                                   origin='lower', aspect='auto')
                    
                     ax.set_title(f"{sim['params']['defect_type']} - {sim['params']['orientation']}")
@@ -1765,8 +2049,7 @@ SIMULATIONS:
 # =============================================
 with st.expander("Model & Scientific Foundation", expanded=False):
     st.markdown("""
-    ### Fully Upgraded to Shen & Beyerlein (2025) Nanotwin Model
-    
+        
     **Now featuring:**
     - True **multi-order-parameter phase-field** (η₀ = matrix, η₁ = twin variant)
     - **Structural twin representation** — discrete crystallographic variants
