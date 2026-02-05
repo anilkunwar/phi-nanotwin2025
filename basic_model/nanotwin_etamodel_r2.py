@@ -15,15 +15,17 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try to import Numba for JIT compilation
+# Try to import Numba, but handle gracefully if not available
 try:
-    from numba import jit, njit, prange, float64, complex128, int64, vectorize
+    from numba import jit, njit, prange, float64, int32, vectorize
     import numba as nb
     HAVE_NUMBA = True
-    NUMBA_CONFIG = {"fastmath": True, "parallel": True, "cache": True}
+    # Use simpler signature without complex tuple returns
+    NUMBA_AVAILABLE = True
 except ImportError:
     HAVE_NUMBA = False
-    NUMBA_CONFIG = {}
+    NUMBA_AVAILABLE = False
+    print("Numba not available, using pure Python fallback")
 
 # Set page config FIRST
 st.set_page_config(
@@ -34,11 +36,12 @@ st.set_page_config(
 )
 
 # ============================================================================
-# OPTIMIZED NUMERICAL KERNELS (Numba JIT compiled)
+# OPTIMIZED NUMERICAL KERNELS with FIXED NUMBA SIGNATURES
 # ============================================================================
 
-if HAVE_NUMBA:
-    @njit(float64[:,:](float64[:,:], float64, float64), parallel=True, fastmath=True, cache=True)
+if NUMBA_AVAILABLE:
+    # SIMPLER: Use @jit instead of @njit with explicit signatures
+    @jit(nopython=True, parallel=True, fastmath=True, cache=True)
     def laplace_2d_numba(f, dx, dy):
         """2D Laplace operator with periodic boundary conditions - Numba optimized"""
         ny, nx = f.shape
@@ -58,143 +61,144 @@ if HAVE_NUMBA:
                                 + (f[i, jm1] - 2 * f[i, j] + f[i, jp1]) / dx2
         return laplace_f
 
-    @njit(float64[:,:](float64[:,:], float64[:,:], float64, float64, float64, float64, float64), 
-          parallel=True, fastmath=True, cache=True)
-    def allen_cahn_step_numba(eta_m, eta_t, dt, L, m, kappa, dx, dy):
-        """Allen-Cahn evolution step - Fully Numba optimized"""
+    # SIMPLER: Split into two functions to avoid tuple return type issues
+    @jit(nopython=True, parallel=True, fastmath=True, cache=True)
+    def allen_cahn_step_numba_m(eta_m, eta_t, dt, L, m, kappa, dx, dy):
+        """Numba-optimized Allen-Cahn step for eta_m"""
         ny, nx = eta_m.shape
         
-        # Compute gradients (central differences)
-        grad_m_x = np.zeros((ny, nx))
-        grad_m_y = np.zeros((ny, nx))
-        grad_t_x = np.zeros((ny, nx))
-        grad_t_y = np.zeros((ny, nx))
+        # Compute Laplacians
+        laplace_m = laplace_2d_numba(eta_m, dx, dy)
+        laplace_t = laplace_2d_numba(eta_t, dx, dy)
+        
+        # Update eta_m
+        eta_m_new = np.zeros((ny, nx))
         
         for i in prange(ny):
-            im1 = (i - 1) % ny
-            ip1 = (i + 1) % ny
             for j in prange(nx):
-                jm1 = (j - 1) % nx
-                jp1 = (j + 1) % nx
+                em = eta_m[i, j]
+                et = eta_t[i, j]
                 
-                grad_m_x[i, j] = (eta_m[i, jp1] - eta_m[i, jm1]) / (2 * dx)
-                grad_m_y[i, j] = (eta_m[ip1, j] - eta_m[im1, j]) / (2 * dy)
-                grad_t_x[i, j] = (eta_t[i, jp1] - eta_t[i, jm1]) / (2 * dx)
-                grad_t_y[i, j] = (eta_t[ip1, j] - eta_t[im1, j]) / (2 * dy)
+                # Bulk term
+                bulk = m * (em**3 - em + 2 * em * et**2)
+                
+                # Gradient term
+                grad = -kappa * laplace_m[i, j]
+                
+                # Total derivative
+                derivative = bulk + grad
+                
+                # Allen-Cahn update
+                eta_m_new[i, j] = em - dt * L * derivative
         
-        # Compute functional derivatives
-        df_m = np.zeros((ny, nx))
-        df_t = np.zeros((ny, nx))
-        
-        for i in prange(ny):
-            im1 = (i - 1) % ny
-            ip1 = (i + 1) % ny
-            for j in prange(nx):
-                jm1 = (j - 1) % nx
-                jp1 = (j + 1) % nx
-                
-                # Bulk term (double well + interaction)
-                eta_m_ij = eta_m[i, j]
-                eta_t_ij = eta_t[i, j]
-                
-                # Simplified interaction term for speed
-                interaction = eta_m_ij * eta_t_ij * eta_t_ij + eta_t_ij * eta_m_ij * eta_m_ij
-                
-                df_m[i, j] = m * (eta_m_ij * eta_m_ij * eta_m_ij - eta_m_ij + interaction)
-                df_t[i, j] = m * (eta_t_ij * eta_t_ij * eta_t_ij - eta_t_ij + interaction)
-                
-                # Gradient term (Laplacian)
-                laplace_m = (eta_m[im1, j] - 2 * eta_m_ij + eta_m[ip1, j]) / (dy * dy) \
-                          + (eta_m[i, jm1] - 2 * eta_m_ij + eta_m[i, jp1]) / (dx * dx)
-                laplace_t = (eta_t[im1, j] - 2 * eta_t_ij + eta_t[ip1, j]) / (dy * dy) \
-                          + (eta_t[i, jm1] - 2 * eta_t_ij + eta_t[i, jp1]) / (dx * dx)
-                
-                df_m[i, j] -= kappa * laplace_m
-                df_t[i, j] -= kappa * laplace_t
-        
-        # Update using Allen-Cahn
-        eta_m_new = eta_m - dt * L * df_m
-        eta_t_new = eta_t - dt * L * df_t
-        
-        # Clamp and normalize
-        eta_m_new = np.maximum(0.0, np.minimum(1.0, eta_m_new))
-        eta_t_new = np.maximum(0.0, np.minimum(1.0, eta_t_new))
-        
-        # Ensure sum ~ 1
-        sum_eta = eta_m_new + eta_t_new
-        mask = np.abs(sum_eta - 1.0) > 0.01
+        # Clamp values
         for i in prange(ny):
             for j in prange(nx):
-                if mask[i, j]:
-                    s = sum_eta[i, j]
-                    eta_m_new[i, j] /= s
-                    eta_t_new[i, j] /= s
+                if eta_m_new[i, j] < 0:
+                    eta_m_new[i, j] = 0
+                elif eta_m_new[i, j] > 1:
+                    eta_m_new[i, j] = 1
         
-        return eta_m_new, eta_t_new
+        return eta_m_new
 
-    @njit(float64[:,:](float64[:,:], float64), parallel=True, fastmath=True, cache=True)
-    def fft_laplace_numba(f, kappa):
-        """FFT-based Laplace operator using Numba (if FFT is available in Numba)"""
-        # Note: Numba's FFT support varies by version
-        # Fallback to standard numpy FFT if Numba FFT not available
-        ny, nx = f.shape
-        kx = 2j * np.pi * np.fft.fftfreq(nx, 1.0/nx)
-        ky = 2j * np.pi * np.fft.fftfreq(ny, 1.0/ny)
-        kx2 = kx * kx
-        ky2 = ky * ky
+    @jit(nopython=True, parallel=True, fastmath=True, cache=True)
+    def allen_cahn_step_numba_t(eta_m, eta_t, dt, L, m, kappa, dx, dy):
+        """Numba-optimized Allen-Cahn step for eta_t"""
+        ny, nx = eta_t.shape
         
-        f_hat = np.fft.fft2(f)
-        k2 = kx2[:, None] + ky2[None, :]
-        laplace_f_hat = -k2 * f_hat
-        laplace_f = np.real(np.fft.ifft2(laplace_f_hat))
+        # Compute Laplacians
+        laplace_m = laplace_2d_numba(eta_m, dx, dy)
+        laplace_t = laplace_2d_numba(eta_t, dx, dy)
         
-        return laplace_f
+        # Update eta_t
+        eta_t_new = np.zeros((ny, nx))
+        
+        for i in prange(ny):
+            for j in prange(nx):
+                em = eta_m[i, j]
+                et = eta_t[i, j]
+                
+                # Bulk term
+                bulk = m * (et**3 - et + 2 * et * em**2)
+                
+                # Gradient term
+                grad = -kappa * laplace_t[i, j]
+                
+                # Total derivative
+                derivative = bulk + grad
+                
+                # Allen-Cahn update
+                eta_t_new[i, j] = et - dt * L * derivative
+        
+        # Clamp values
+        for i in prange(ny):
+            for j in prange(nx):
+                if eta_t_new[i, j] < 0:
+                    eta_t_new[i, j] = 0
+                elif eta_t_new[i, j] > 1:
+                    eta_t_new[i, j] = 1
+        
+        return eta_t_new
 
-    @vectorize([float64(float64, float64, float64, float64)], fastmath=True, cache=True)
-    def double_well_potential(eta, a, b, c):
+    # Vectorized function for faster computations
+    @vectorize([float64(float64, float64, float64)], nopython=True, cache=True)
+    def double_well_vectorized(x, a, b):
         """Vectorized double-well potential"""
-        return a * eta**4 + b * eta**2 + c * eta**3
+        return a * x**4 - b * x**2
 
 else:
-    # Fallback Python implementations (slower)
+    # Fallback Python implementations
     def laplace_2d_numba(f, dx, dy):
-        """Fallback Python implementation of Laplace operator"""
+        """Python implementation of Laplace operator"""
         from scipy.ndimage import laplace
         return laplace(f, mode='wrap') / (dx * dy)
     
-    def allen_cahn_step_numba(eta_m, eta_t, dt, L, m, kappa, dx, dy):
-        """Fallback Python implementation"""
+    def allen_cahn_step_numba_m(eta_m, eta_t, dt, L, m, kappa, dx, dy):
+        """Python implementation for eta_m"""
         from scipy.ndimage import laplace
         
         # Bulk term
         df_m = m * (eta_m**3 - eta_m + 2 * eta_m * eta_t**2)
-        df_t = m * (eta_t**3 - eta_t + 2 * eta_t * eta_m**2)
         
         # Gradient term
         df_m -= kappa * laplace(eta_m, mode='wrap') / (dx * dy)
-        df_t -= kappa * laplace(eta_t, mode='wrap') / (dx * dy)
         
         # Update
         eta_m_new = eta_m - dt * L * df_m
+        
+        # Clamp
+        eta_m_new = np.clip(eta_m_new, 0, 1)
+        
+        return eta_m_new
+    
+    def allen_cahn_step_numba_t(eta_m, eta_t, dt, L, m, kappa, dx, dy):
+        """Python implementation for eta_t"""
+        from scipy.ndimage import laplace
+        
+        # Bulk term
+        df_t = m * (eta_t**3 - eta_t + 2 * eta_t * eta_m**2)
+        
+        # Gradient term
+        df_t -= kappa * laplace(eta_t, mode='wrap') / (dx * dy)
+        
+        # Update
         eta_t_new = eta_t - dt * L * df_t
         
-        # Clamp and normalize
-        eta_m_new = np.clip(eta_m_new, 0, 1)
+        # Clamp
         eta_t_new = np.clip(eta_t_new, 0, 1)
         
-        sum_eta = eta_m_new + eta_t_new
-        mask = np.abs(sum_eta - 1) > 0.01
-        eta_m_new[mask] /= sum_eta[mask]
-        eta_t_new[mask] /= sum_eta[mask]
-        
-        return eta_m_new, eta_t_new
+        return eta_t_new
+    
+    def double_well_vectorized(x, a, b):
+        """Vectorized double-well potential (Python)"""
+        return a * x**4 - b * x**2
 
 # ============================================================================
-# FFT-BASED SOLVER CLASS (Fast Spectral Method)
+# FFT-BASED SOLVER (No Numba dependency)
 # ============================================================================
 
 class FFTSolver:
-    """FFT-based spectral solver for phase field equations"""
+    """FFT-based spectral solver using numpy.fft"""
     
     def __init__(self, nx, ny, Lx, Ly):
         self.nx = nx
@@ -202,18 +206,13 @@ class FFTSolver:
         self.Lx = Lx
         self.Ly = Ly
         
-        # Wave numbers
-        self.kx = 2j * np.pi * np.fft.fftfreq(nx, Lx/nx)
-        self.ky = 2j * np.pi * np.fft.fftfreq(ny, Ly/ny)
-        self.kx2 = self.kx * self.kx
-        self.ky2 = self.ky * self.ky
-        self.k2 = self.kx2[:, None] + self.ky2[None, :]
+        # Wave numbers (using numpy.fft)
+        self.kx = 2j * np.pi * np.fft.fftfreq(nx, d=Lx/nx)
+        self.ky = 2j * np.pi * np.fft.fftfreq(ny, d=Ly/ny)
         
-        # Pre-allocate arrays for FFT
-        self.eta_m_hat = np.zeros((nx, ny), dtype=complex)
-        self.eta_t_hat = np.zeros((nx, ny), dtype=complex)
-        self.nonlinear_m = np.zeros((ny, nx))
-        self.nonlinear_t = np.zeros((ny, nx))
+        # Create 2D k-space grid
+        KX, KY = np.meshgrid(self.kx, self.ky)
+        self.k2 = KX**2 + KY**2
         
     def laplace_fft(self, f):
         """Compute Laplace using FFT"""
@@ -225,66 +224,35 @@ class FFTSolver:
     def gradient_fft(self, f):
         """Compute gradient using FFT"""
         f_hat = np.fft.fft2(f)
-        grad_x_hat = self.kx[:, None] * f_hat
-        grad_y_hat = self.ky[None, :] * f_hat
+        
+        grad_x_hat = 1j * self.kx * f_hat
+        grad_y_hat = 1j * self.ky * f_hat
+        
         grad_x = np.real(np.fft.ifft2(grad_x_hat))
         grad_y = np.real(np.fft.ifft2(grad_y_hat))
+        
         return grad_x, grad_y
     
-    def spectral_step(self, eta_m, eta_t, dt, L, m, kappa, method='semi_implicit'):
-        """Spectral time stepping"""
-        if method == 'semi_implicit':
-            return self._semi_implicit_step(eta_m, eta_t, dt, L, m, kappa)
-        else:
-            return self._explicit_spectral_step(eta_m, eta_t, dt, L, m, kappa)
-    
-    def _explicit_spectral_step(self, eta_m, eta_t, dt, L, m, kappa):
-        """Explicit spectral method"""
-        # Compute nonlinear terms in real space
-        self.nonlinear_m = m * (eta_m**3 - eta_m + 2 * eta_m * eta_t**2)
-        self.nonlinear_t = m * (eta_t**3 - eta_t + 2 * eta_t * eta_m**2)
-        
-        # Transform to Fourier space
-        eta_m_hat = np.fft.fft2(eta_m)
-        eta_t_hat = np.fft.fft2(eta_t)
-        N_m_hat = np.fft.fft2(self.nonlinear_m)
-        N_t_hat = np.fft.fft2(self.nonlinear_t)
-        
-        # Spectral update (explicit Euler)
-        eta_m_hat_new = eta_m_hat + dt * (-L * kappa * self.k2 * eta_m_hat - L * N_m_hat)
-        eta_t_hat_new = eta_t_hat + dt * (-L * kappa * self.k2 * eta_t_hat - L * N_t_hat)
-        
-        # Transform back
-        eta_m_new = np.real(np.fft.ifft2(eta_m_hat_new))
-        eta_t_new = np.real(np.fft.ifft2(eta_t_hat_new))
-        
-        # Apply bounds
-        eta_m_new = np.clip(eta_m_new, 0, 1)
-        eta_t_new = np.clip(eta_t_new, 0, 1)
-        
-        return eta_m_new, eta_t_new
-    
-    def _semi_implicit_step(self, eta_m, eta_t, dt, L, m, kappa):
-        """Semi-implicit spectral method (more stable)"""
-        # Linear operator in Fourier space
-        lin_op_m = 1.0 / (1.0 + dt * L * kappa * self.k2)
-        lin_op_t = 1.0 / (1.0 + dt * L * kappa * self.k2)
+    def spectral_step(self, eta_m, eta_t, dt, L, m, kappa):
+        """Spectral time stepping using semi-implicit method"""
+        # Precompute linear operator
+        lin_op = 1.0 / (1.0 + dt * L * kappa * self.k2)
         
         # Nonlinear terms in real space
         N_m = m * (eta_m**3 - eta_m + 2 * eta_m * eta_t**2)
         N_t = m * (eta_t**3 - eta_t + 2 * eta_t * eta_m**2)
         
-        # Transform
+        # Transform to Fourier space
         eta_m_hat = np.fft.fft2(eta_m)
         eta_t_hat = np.fft.fft2(eta_t)
         N_m_hat = np.fft.fft2(N_m)
         N_t_hat = np.fft.fft2(N_t)
         
-        # Semi-implicit update
-        eta_m_hat_new = lin_op_m * (eta_m_hat - dt * L * N_m_hat)
-        eta_t_hat_new = lin_op_t * (eta_t_hat - dt * L * N_t_hat)
+        # Semi-implicit update in Fourier space
+        eta_m_hat_new = lin_op * (eta_m_hat - dt * L * N_m_hat)
+        eta_t_hat_new = lin_op * (eta_t_hat - dt * L * N_t_hat)
         
-        # Transform back
+        # Transform back to real space
         eta_m_new = np.real(np.fft.ifft2(eta_m_hat_new))
         eta_t_new = np.real(np.fft.ifft2(eta_t_hat_new))
         
@@ -292,7 +260,7 @@ class FFTSolver:
         eta_m_new = np.clip(eta_m_new, 0, 1)
         eta_t_new = np.clip(eta_t_new, 0, 1)
         
-        # Ensure sum ~ 1
+        # Ensure conservation (eta_m + eta_t ≈ 1)
         sum_eta = eta_m_new + eta_t_new
         mask = np.abs(sum_eta - 1.0) > 0.01
         eta_m_new[mask] /= sum_eta[mask]
@@ -301,227 +269,135 @@ class FFTSolver:
         return eta_m_new, eta_t_new
 
 # ============================================================================
-# MULTIGRID SOLVER (for larger systems)
+# ADAPTIVE TIME STEPPING
 # ============================================================================
 
-class MultigridSolver:
-    """Multigrid solver for accelerated convergence"""
+class AdaptiveTimeStepper:
+    """Adaptive time step controller for stability and efficiency"""
     
-    def __init__(self, nx, ny, Lx, Ly):
-        self.nx = nx
-        self.ny = ny
-        self.Lx = Lx
-        self.Ly = Ly
-        self.dx = Lx / nx
-        self.dy = Ly / ny
+    def __init__(self, dt_initial, dt_min=1e-15, dt_max=1e-10, 
+                 safety_factor=0.8, max_change=2.0):
+        self.dt = dt_initial
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.safety_factor = safety_factor
+        self.max_change = max_change
+        self.energy_history = []
+        self.time_history = []
         
-        # Create grid hierarchy
-        self.levels = self._create_grid_hierarchy()
+    def adjust_time_step(self, energy_new, energy_old, step_successful=True):
+        """Adjust time step based on energy change"""
+        if len(self.energy_history) < 2:
+            return self.dt
         
-    def _create_grid_hierarchy(self):
-        """Create multigrid levels"""
-        levels = []
-        nx, ny = self.nx, self.ny
+        if not step_successful:
+            # Step failed, reduce time step
+            self.dt = max(self.dt * 0.5, self.dt_min)
+            return self.dt
         
-        while nx >= 4 and ny >= 4:
-            levels.append({
-                'nx': nx,
-                'ny': ny,
-                'dx': self.Lx / nx,
-                'dy': self.Ly / ny
-            })
-            nx //= 2
-            ny //= 2
+        # Calculate energy change rate
+        if len(self.energy_history) >= 2:
+            energy_change = abs(energy_new - energy_old) / (abs(energy_old) + 1e-10)
+            
+            # Adjust time step based on energy change
+            if energy_change < 1e-6:
+                # Very stable, increase time step
+                self.dt = min(self.dt * self.max_change, self.dt_max)
+            elif energy_change > 1e-3:
+                # Large changes, decrease time step
+                self.dt = max(self.dt * 0.5, self.dt_min)
+            else:
+                # Moderate changes, keep similar time step
+                pass
         
-        return levels
+        # Apply safety factor
+        self.dt *= self.safety_factor
+        
+        # Ensure within bounds
+        self.dt = max(self.dt_min, min(self.dt, self.dt_max))
+        
+        return self.dt
     
-    def restrict(self, fine):
-        """Restrict fine grid to coarse grid"""
-        ny, nx = fine.shape
-        coarse = np.zeros((ny//2, nx//2))
+    def record_energy(self, energy, time):
+        """Record energy for adaptive stepping"""
+        self.energy_history.append(energy)
+        self.time_history.append(time)
         
-        for i in range(0, ny, 2):
-            for j in range(0, nx, 2):
-                coarse[i//2, j//2] = 0.25 * (
-                    fine[i, j] + fine[min(i+1, ny-1), j] +
-                    fine[i, min(j+1, nx-1)] + fine[min(i+1, ny-1), min(j+1, nx-1)]
-                )
-        
-        return coarse
-    
-    def prolong(self, coarse, shape):
-        """Prolong coarse grid to fine grid"""
-        ny_c, nx_c = coarse.shape
-        ny_f, nx_f = shape
-        fine = np.zeros((ny_f, nx_f))
-        
-        for i in range(ny_c):
-            for j in range(nx_c):
-                i2 = i * 2
-                j2 = j * 2
-                
-                if i2 < ny_f and j2 < nx_f:
-                    fine[i2, j2] = coarse[i, j]
-                    if i2 + 1 < ny_f:
-                        fine[i2 + 1, j2] = coarse[i, j]
-                    if j2 + 1 < nx_f:
-                        fine[i2, j2 + 1] = coarse[i, j]
-                    if i2 + 1 < ny_f and j2 + 1 < nx_f:
-                        fine[i2 + 1, j2 + 1] = coarse[i, j]
-        
-        return fine
-    
-    def v_cycle(self, eta_m, eta_t, rhs_m, rhs_t, m, kappa, L, pre_smooth=2, post_smooth=2):
-        """V-cycle multigrid"""
-        # Pre-smoothing
-        for _ in range(pre_smooth):
-            eta_m, eta_t = self._smooth(eta_m, eta_t, rhs_m, rhs_t, m, kappa, L)
-        
-        # Compute residuals
-        res_m = rhs_m - self._apply_operator(eta_m, m, kappa, L)
-        res_t = rhs_t - self._apply_operator(eta_t, m, kappa, L)
-        
-        # Restrict residuals
-        res_m_coarse = self.restrict(res_m)
-        res_t_coarse = self.restrict(res_t)
-        
-        # Solve coarse grid
-        if res_m_coarse.shape[0] >= 4 and res_m_coarse.shape[1] >= 4:
-            # Recursive V-cycle
-            corr_m, corr_t = self.v_cycle(
-                np.zeros_like(res_m_coarse),
-                np.zeros_like(res_t_coarse),
-                res_m_coarse,
-                res_t_coarse,
-                m, kappa, L,
-                pre_smooth, post_smooth
-            )
-        else:
-            # Direct solve on coarsest grid
-            corr_m, corr_t = self._direct_solve(
-                res_m_coarse, res_t_coarse, m, kappa, L
-            )
-        
-        # Prolong and correct
-        eta_m += self.prolong(corr_m, eta_m.shape)
-        eta_t += self.prolong(corr_t, eta_t.shape)
-        
-        # Post-smoothing
-        for _ in range(post_smooth):
-            eta_m, eta_t = self._smooth(eta_m, eta_t, rhs_m, rhs_t, m, kappa, L)
-        
-        return eta_m, eta_t
-    
-    def _smooth(self, eta_m, eta_t, rhs_m, rhs_t, m, kappa, L):
-        """Gauss-Seidel smoother"""
-        ny, nx = eta_m.shape
-        dx2 = self.dx * self.dx
-        dy2 = self.dy * self.dy
-        
-        for i in range(ny):
-            for j in range(nx):
-                # Jacobi update
-                neighbors_m = (
-                    eta_m[(i-1)%ny, j] + eta_m[(i+1)%ny, j]
-                ) / dy2 + (
-                    eta_m[i, (j-1)%nx] + eta_m[i, (j+1)%nx]
-                ) / dx2
-                
-                neighbors_t = (
-                    eta_t[(i-1)%ny, j] + eta_t[(i+1)%ny, j]
-                ) / dy2 + (
-                    eta_t[i, (j-1)%nx] + eta_t[i, (j+1)%nx]
-                ) / dx2
-                
-                diag_m = -2.0 * (1.0/dy2 + 1.0/dx2)
-                diag_t = -2.0 * (1.0/dy2 + 1.0/dx2)
-                
-                # Update
-                eta_m[i, j] = (rhs_m[i, j] - kappa * neighbors_m) / (kappa * diag_m + m)
-                eta_t[i, j] = (rhs_t[i, j] - kappa * neighbors_t) / (kappa * diag_t + m)
-        
-        return eta_m, eta_t
-    
-    def _apply_operator(self, eta, m, kappa, L):
-        """Apply linear operator"""
-        laplace = laplace_2d_numba(eta, self.dx, self.dy)
-        return m * eta - kappa * laplace
-    
-    def _direct_solve(self, rhs_m, rhs_t, m, kappa, L):
-        """Direct solve on coarsest grid"""
-        # Simple diagonal solve for coarsest grid
-        return rhs_m / m, rhs_t / m
+        # Keep only recent history
+        if len(self.energy_history) > 100:
+            self.energy_history.pop(0)
+            self.time_history.pop(0)
 
 # ============================================================================
-# MATERIAL DATABASE (unchanged)
+# MATERIAL DATABASE
 # ============================================================================
 
 class MaterialDatabase:
-    """Embedded material properties database."""
+    """Material properties database"""
     
     MATERIALS = {
         'Cu': {
-            'material': 'Copper',
+            'name': 'Copper',
             'sigma_ctb': 0.5e-3,
             'sigma_itb': 0.8e-3,
             'sigma_gb': 1.0e-3,
-            'M_itb_prefactor': 5e-6,
-            'M_itb_activation_energy': 0.2,
+            'M_prefactor': 5e-6,
+            'E_act': 0.2,
             'color': '#e41a1c',
             'density': 8960,
             'melting_point': 1357.77
         },
         'Al': {
-            'material': 'Aluminum',
+            'name': 'Aluminum',
             'sigma_ctb': 0.4e-3,
             'sigma_itb': 0.6e-3,
             'sigma_gb': 0.9e-3,
-            'M_itb_prefactor': 8e-6,
-            'M_itb_activation_energy': 0.15,
+            'M_prefactor': 8e-6,
+            'E_act': 0.15,
             'color': '#377eb8',
             'density': 2700,
             'melting_point': 933.47
         },
         'Ni': {
-            'material': 'Nickel',
+            'name': 'Nickel',
             'sigma_ctb': 0.7e-3,
             'sigma_itb': 1.0e-3,
             'sigma_gb': 1.2e-3,
-            'M_itb_prefactor': 3e-6,
-            'M_itb_activation_energy': 0.25,
+            'M_prefactor': 3e-6,
+            'E_act': 0.25,
             'color': '#4daf4a',
             'density': 8908,
             'melting_point': 1728
         },
         'Ag': {
-            'material': 'Silver',
+            'name': 'Silver',
             'sigma_ctb': 0.45e-3,
             'sigma_itb': 0.7e-3,
             'sigma_gb': 0.95e-3,
-            'M_itb_prefactor': 6e-6,
-            'M_itb_activation_energy': 0.18,
+            'M_prefactor': 6e-6,
+            'E_act': 0.18,
             'color': '#984ea3',
             'density': 10490,
             'melting_point': 1234.93
         },
         'Au': {
-            'material': 'Gold',
+            'name': 'Gold',
             'sigma_ctb': 0.48e-3,
             'sigma_itb': 0.75e-3,
             'sigma_gb': 1.0e-3,
-            'M_itb_prefactor': 4e-6,
-            'M_itb_activation_energy': 0.22,
+            'M_prefactor': 4e-6,
+            'E_act': 0.22,
             'color': '#ff7f00',
             'density': 19320,
             'melting_point': 1337.33
         },
         'Pd': {
-            'material': 'Palladium',
+            'name': 'Palladium',
             'sigma_ctb': 0.65e-3,
             'sigma_itb': 0.9e-3,
             'sigma_gb': 1.1e-3,
-            'M_itb_prefactor': 3.5e-6,
-            'M_itb_activation_energy': 0.24,
+            'M_prefactor': 3.5e-6,
+            'E_act': 0.24,
             'color': '#ffff33',
             'density': 12023,
             'melting_point': 1828.05
@@ -529,67 +405,66 @@ class MaterialDatabase:
     }
     
     @classmethod
-    def get_material_properties(cls, material):
-        """Get material properties from embedded database."""
-        if material not in cls.MATERIALS:
-            raise ValueError(f"Material '{material}' not found. Available: {list(cls.MATERIALS.keys())}")
-        return cls.MATERIALS[material].copy()
+    def get_material(cls, name):
+        """Get material properties"""
+        if name not in cls.MATERIALS:
+            raise ValueError(f"Material '{name}' not found")
+        return cls.MATERIALS[name].copy()
 
 # ============================================================================
-# ENHANCED SIMULATION PARAMETERS WITH ADAPTIVE TIME STEPPING
+# SIMULATION PARAMETERS
 # ============================================================================
 
 class SimulationParameters:
-    def __init__(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval, solver_type='numba'):
+    """Simulation parameters with validation"""
+    
+    def __init__(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, 
+                 t_max, output_interval, solver_type='numpy'):
         # Validate inputs
-        self.validate_inputs(material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval)
+        self._validate_inputs(material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval)
         
-        # Get material properties
-        material_data = MaterialDatabase.get_material_properties(material)
-        
+        # Material properties
         self.material = material
-        self.material_name = material_data['material']
-        self.material_color = material_data['color']
-        self.sigma_ctb = material_data['sigma_ctb']
-        self.sigma_itb = material_data['sigma_itb']
-        self.sigma_gb = material_data['sigma_gb']
-        self.M_itb_prefactor = material_data['M_itb_prefactor']
-        self.M_itb_activation_energy = material_data['M_itb_activation_energy']
+        mat_props = MaterialDatabase.get_material(material)
         
-        # Physical constants
-        self.k_B = 8.617333262145e-5  # Boltzmann constant in eV/K
+        self.material_name = mat_props['name']
+        self.sigma_itb = mat_props['sigma_itb']
+        self.M_prefactor = mat_props['M_prefactor']
+        self.E_act = mat_props['E_act']
         
-        # Calculate temperature-dependent mobility
-        if temperature <= 0:
-            raise ValueError("Temperature must be positive")
+        # Physical parameters
         self.temperature = temperature
-        self.M_itb = self.M_itb_prefactor * np.exp(-self.M_itb_activation_energy / (self.k_B * temperature))
+        self.k_B = 8.617333262145e-5  # eV/K
         
-        # Interface parameters
+        # Calculate mobility
+        self.M = self.M_prefactor * np.exp(-self.E_act / (self.k_B * temperature))
+        
+        # Phase field parameters
         self.l_int = 1e-9  # Interface width (m)
-        self.m = 6 * self.sigma_itb / self.l_int  # Free energy barrier
+        self.m = 6 * self.sigma_itb / self.l_int  # Energy barrier
         self.kappa = 0.75 * self.sigma_itb * self.l_int  # Gradient coefficient
-        self.delta_sigma = 0.5  # Anisotropy strength
-        self.L = 4/3 * self.M_itb / self.l_int  # Kinetic coefficient
+        self.L = 4/3 * self.M / self.l_int  # Kinetic coefficient
         
-        # Numerical parameters
-        self.Lx, self.Ly = Lx, Ly  # Domain size (m)
-        self.Nx, self.Ny = Nx, Ny  # Grid points
-        self.dx = self.Lx / self.Nx  # Grid spacing (m)
-        self.dy = self.Ly / self.Ny
+        # Domain parameters
+        self.Lx = Lx
+        self.Ly = Ly
+        self.Nx = Nx
+        self.Ny = Ny
+        self.dx = Lx / Nx
+        self.dy = Ly / Ny
         
-        # Adaptive time step based on stability criteria
-        dt_diffusive = 0.25 * min(self.dx**2, self.dy**2) / (self.L * self.kappa)
-        dt_reaction = 0.1 / (self.L * self.m)
-        self.dt = min(1e-12, dt_diffusive, dt_reaction)
-        
-        # For explicit schemes, use smaller time step
-        if solver_type == 'explicit':
-            self.dt *= 0.1
-        
+        # Time parameters
         self.t_max = t_max
+        
+        # Stability condition for explicit scheme
+        dt_stable = 0.25 * min(self.dx**2, self.dy**2) / (self.L * self.kappa)
+        self.dt = min(1e-12, dt_stable)
+        
+        self.total_steps = int(t_max / self.dt)
         self.output_interval = output_interval
         self.twin_width = twin_width
+        
+        # Solver type
         self.solver_type = solver_type
         
         # Create grid
@@ -597,55 +472,29 @@ class SimulationParameters:
         self.y = np.linspace(0, Ly, Ny)
         self.X, self.Y = np.meshgrid(self.x, self.y)
         
-        # Simulation metrics
-        self.total_steps = int(self.t_max / self.dt)
-        
-        # Performance metrics
-        self.cfl_number = self.dt * self.L * self.kappa / min(self.dx**2, self.dy**2)
-        
-    def validate_inputs(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval):
-        """Validate all input parameters."""
+    def _validate_inputs(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, t_max, output_interval):
+        """Validate all input parameters"""
         if material not in MaterialDatabase.MATERIALS:
             raise ValueError(f"Invalid material: {material}")
         if twin_width <= 0:
             raise ValueError("Twin width must be positive")
-        if twin_width >= Ly:
-            raise ValueError(f"Twin width ({twin_width}m) must be less than domain height ({Ly}m)")
         if temperature <= 0:
             raise ValueError("Temperature must be positive")
         if Lx <= 0 or Ly <= 0:
             raise ValueError("Domain dimensions must be positive")
         if Nx < 10 or Ny < 10:
-            raise ValueError("Grid resolution too low (minimum 10x10)")
+            raise ValueError("Grid resolution too low")
         if t_max <= 0:
             raise ValueError("Simulation time must be positive")
         if output_interval <= 0:
             raise ValueError("Output interval must be positive")
-    
-    def get_info_string(self):
-        """Get formatted information string."""
-        return f"""
-        Material: {self.material_name} ({self.material})
-        Solver: {self.solver_type.upper()}
-        Domain: {self.Lx*1e9:.1f} nm × {self.Ly*1e9:.1f} nm
-        Grid: {self.Nx} × {self.Ny} points
-        Resolution: {self.dx*1e9:.2f} nm
-        Twin Width: {self.twin_width*1e9:.1f} nm
-        Temperature: {self.temperature} K
-        Time Step: {self.dt:.2e} s
-        Total Time: {self.t_max:.2e} s ({self.t_max*1e9:.2f} ns)
-        Total Steps: {self.total_steps:,}
-        CFL Number: {self.cfl_number:.4f}
-        Sigma_ITB: {self.sigma_itb:.2e} J/m²
-        Mobility: {self.M_itb:.2e} m⁴/(J·s)
-        """
 
 # ============================================================================
-# FAST PHASE FIELD EVOLUTION WITH MULTIPLE SOLVER OPTIONS
+# OPTIMIZED PHASE FIELD SOLVER
 # ============================================================================
 
-class FastPhaseFieldEvolution:
-    """Fast phase field evolution with multiple solver options."""
+class OptimizedPhaseFieldSolver:
+    """Fast phase field solver with multiple optimization strategies"""
     
     def __init__(self, params):
         self.params = params
@@ -653,143 +502,76 @@ class FastPhaseFieldEvolution:
         self.time_history = []
         
         # Initialize solver based on type
-        if params.solver_type == 'fft':
-            self.solver = FFTSolver(params.Nx, params.Ny, params.Lx, params.Ly)
-            self.step_fn = self._fft_step
-        elif params.solver_type == 'multigrid':
-            self.solver = MultigridSolver(params.Nx, params.Ny, params.Lx, params.Ly)
-            self.step_fn = self._multigrid_step
-        elif params.solver_type == 'numba' and HAVE_NUMBA:
-            self.step_fn = self._numba_step
-        else:
-            self.step_fn = self._python_step
+        self.solver_type = params.solver_type
         
-        # Adaptive time stepping parameters
-        self.adaptive_dt = params.dt
-        self.dt_min = params.dt * 0.1
-        self.dt_max = params.dt * 10.0
-        self.energy_tolerance = 1e-6
-        self.max_dt_change = 1.1
-    
+        if self.solver_type == 'fft':
+            self.fft_solver = FFTSolver(params.Nx, params.Ny, params.Lx, params.Ly)
+            self.step_function = self._fft_step
+        elif self.solver_type == 'numba' and NUMBA_AVAILABLE:
+            self.step_function = self._numba_step
+        else:
+            self.step_function = self._numpy_step
+        
+        # Adaptive time stepping
+        self.adaptive_stepper = AdaptiveTimeStepper(
+            dt_initial=params.dt,
+            dt_min=params.dt * 0.01,
+            dt_max=params.dt * 10.0
+        )
+        
     def initialize_fields(self):
-        """Initialize order parameters with smooth interface."""
+        """Initialize phase fields with smooth interface"""
         # Center of domain
         y_center = self.params.Ly / 2
         half_width = self.params.twin_width / 2
         
         # Create smooth twin profile
-        if HAVE_NUMBA:
-            eta_t = self._initialize_tanh_numba(y_center, half_width)
-        else:
-            eta_t = 0.5 * (
-                1 + np.tanh(4 * (self.params.Y - (y_center - half_width)) / self.params.l_int)
-            ) * 0.5 * (
-                1 - np.tanh(4 * (self.params.Y - (y_center + half_width)) / self.params.l_int)
-            )
+        Y = self.params.Y
+        eta_t = 0.5 * (1 + np.tanh(4 * (Y - (y_center - half_width)) / self.params.l_int)) * \
+                0.5 * (1 - np.tanh(4 * (Y - (y_center + half_width)) / self.params.l_int))
         
         # Matrix phase
         eta_m = 1 - eta_t
         
-        # Add small perturbation to break symmetry
+        # Add small perturbation
         noise = 0.01 * np.random.randn(self.params.Ny, self.params.Nx)
         eta_m += noise
         eta_t -= noise
         
         # Normalize
         sum_eta = eta_m + eta_t
-        eta_m = eta_m / sum_eta
-        eta_t = eta_t / sum_eta
+        eta_m /= sum_eta
+        eta_t /= sum_eta
         
         return eta_m, eta_t
     
-    if HAVE_NUMBA:
-        @staticmethod
-        @njit(float64[:,:](float64[:,:], float64, float64, float64), parallel=True, cache=True)
-        def _initialize_tanh_numba(Y, y_center, half_width, l_int):
-            """Numba-optimized initialization"""
-            ny, nx = Y.shape
-            eta_t = np.zeros((ny, nx))
-            
-            for i in prange(ny):
-                for j in prange(nx):
-                    y = Y[i, j]
-                    upper = 0.5 * (1 + np.tanh(4 * (y - (y_center - half_width)) / l_int))
-                    lower = 0.5 * (1 - np.tanh(4 * (y - (y_center + half_width)) / l_int))
-                    eta_t[i, j] = upper * lower
-            
-            return eta_t
-        
-        def _initialize_tanh_numba(self, y_center, half_width):
-            """Wrapper for Numba initialization"""
-            return self._initialize_tanh_numba(self.params.Y, y_center, half_width, self.params.l_int)
-    
-    def _numba_step(self, eta_m, eta_t):
-        """Numba-accelerated step"""
-        eta_m_new, eta_t_new = allen_cahn_step_numba(
-            eta_m, eta_t,
-            self.adaptive_dt,
-            self.params.L,
-            self.params.m,
-            self.params.kappa,
-            self.params.dx,
-            self.params.dy
-        )
-        return eta_m_new, eta_t_new
-    
-    def _fft_step(self, eta_m, eta_t):
-        """FFT-based spectral step"""
-        eta_m_new, eta_t_new = self.solver.spectral_step(
-            eta_m, eta_t,
-            self.adaptive_dt,
-            self.params.L,
-            self.params.m,
-            self.params.kappa,
-            method='semi_implicit'
-        )
-        return eta_m_new, eta_t_new
-    
-    def _multigrid_step(self, eta_m, eta_t):
-        """Multigrid step"""
-        # For multigrid, we solve the implicit system
-        rhs_m = eta_m - self.adaptive_dt * self.params.L * self.params.m * (
-            eta_m**3 - eta_m + 2 * eta_m * eta_t**2
-        )
-        rhs_t = eta_t - self.adaptive_dt * self.params.L * self.params.m * (
-            eta_t**3 - eta_t + 2 * eta_t * eta_m**2
-        )
-        
-        eta_m_new, eta_t_new = self.solver.v_cycle(
-            eta_m.copy(), eta_t.copy(),
-            rhs_m, rhs_t,
-            self.params.m,
-            self.params.kappa,
-            self.params.L,
-            pre_smooth=2,
-            post_smooth=2
-        )
-        
-        return eta_m_new, eta_t_new
-    
-    def _python_step(self, eta_m, eta_t):
-        """Python fallback step"""
+    def _numpy_step(self, eta_m, eta_t):
+        """Standard numpy implementation"""
         from scipy.ndimage import laplace
         
-        # Bulk term
+        # Bulk terms
         df_m = self.params.m * (eta_m**3 - eta_m + 2 * eta_m * eta_t**2)
         df_t = self.params.m * (eta_t**3 - eta_t + 2 * eta_t * eta_m**2)
         
-        # Gradient term
-        df_m -= self.params.kappa * laplace(eta_m, mode='wrap') / (self.params.dx * self.params.dy)
-        df_t -= self.params.kappa * laplace(eta_t, mode='wrap') / (self.params.dx * self.params.dy)
+        # Gradient terms
+        laplace_m = laplace(eta_m, mode='wrap') / (self.params.dx * self.params.dy)
+        laplace_t = laplace(eta_t, mode='wrap') / (self.params.dx * self.params.dy)
+        
+        df_m -= self.params.kappa * laplace_m
+        df_t -= self.params.kappa * laplace_t
+        
+        # Time step
+        dt = self.adaptive_stepper.dt
         
         # Update
-        eta_m_new = eta_m - self.adaptive_dt * self.params.L * df_m
-        eta_t_new = eta_t - self.adaptive_dt * self.params.L * df_t
+        eta_m_new = eta_m - dt * self.params.L * df_m
+        eta_t_new = eta_t - dt * self.params.L * df_t
         
-        # Clamp and normalize
+        # Apply bounds
         eta_m_new = np.clip(eta_m_new, 0, 1)
         eta_t_new = np.clip(eta_t_new, 0, 1)
         
+        # Ensure conservation
         sum_eta = eta_m_new + eta_t_new
         mask = np.abs(sum_eta - 1) > 0.01
         eta_m_new[mask] /= sum_eta[mask]
@@ -797,43 +579,43 @@ class FastPhaseFieldEvolution:
         
         return eta_m_new, eta_t_new
     
-    def update_step(self, eta_m, eta_t):
-        """Perform one time step with adaptive time stepping."""
-        # Store old energy for adaptive stepping
-        old_energy = self.compute_energy(eta_m, eta_t)
+    def _numba_step(self, eta_m, eta_t):
+        """Numba-accelerated step"""
+        dt = self.adaptive_stepper.dt
         
-        # Take step
-        eta_m_new, eta_t_new = self.step_fn(eta_m, eta_t)
+        eta_m_new = allen_cahn_step_numba_m(
+            eta_m, eta_t, dt, self.params.L,
+            self.params.m, self.params.kappa,
+            self.params.dx, self.params.dy
+        )
         
-        # Compute new energy
-        new_energy = self.compute_energy(eta_m_new, eta_t_new)
-        
-        # Adaptive time step control based on energy change
-        if len(self.energy_history) > 1:
-            energy_change = abs(new_energy - old_energy) / abs(old_energy + 1e-10)
-            
-            if energy_change < self.energy_tolerance * 0.1:
-                # Increase time step
-                self.adaptive_dt = min(self.adaptive_dt * self.max_dt_change, self.dt_max)
-            elif energy_change > self.energy_tolerance * 10:
-                # Decrease time step
-                self.adaptive_dt = max(self.adaptive_dt / self.max_dt_change, self.dt_min)
-        
-        # Track energy
-        self.energy_history.append(new_energy)
+        eta_t_new = allen_cahn_step_numba_t(
+            eta_m, eta_t, dt, self.params.L,
+            self.params.m, self.params.kappa,
+            self.params.dx, self.params.dy
+        )
         
         return eta_m_new, eta_t_new
     
+    def _fft_step(self, eta_m, eta_t):
+        """FFT-based step"""
+        dt = self.adaptive_stepper.dt
+        return self.fft_solver.spectral_step(
+            eta_m, eta_t, dt, self.params.L,
+            self.params.m, self.params.kappa
+        )
+    
     def compute_energy(self, eta_m, eta_t):
-        """Compute total free energy (simplified for speed)."""
+        """Compute total free energy"""
         # Local energy
         f_local = 0.25 * (eta_m**4 + eta_t**4) - 0.5 * (eta_m**2 + eta_t**2)
         f_local += eta_m**2 * eta_t**2
+        f_local *= self.params.m
         
-        # Gradient energy (approximate)
-        if HAVE_NUMBA:
-            grad_m_x, grad_m_y = self._compute_gradient_numba(eta_m)
-            grad_t_x, grad_t_y = self._compute_gradient_numba(eta_t)
+        # Gradient energy
+        if self.solver_type == 'fft':
+            grad_m_x, grad_m_y = self.fft_solver.gradient_fft(eta_m)
+            grad_t_x, grad_t_y = self.fft_solver.gradient_fft(eta_t)
         else:
             grad_m_y, grad_m_x = np.gradient(eta_m, self.params.dy, self.params.dx)
             grad_t_y, grad_t_x = np.gradient(eta_t, self.params.dy, self.params.dx)
@@ -842,140 +624,54 @@ class FastPhaseFieldEvolution:
             grad_m_x**2 + grad_m_y**2 + grad_t_x**2 + grad_t_y**2
         )
         
-        # Total energy
-        f_total = self.params.m * f_local + f_grad
+        # Total energy density
+        f_total = f_local + f_grad
         
-        # Integrate
+        # Integrate over domain
         energy = np.trapz(np.trapz(f_total, dx=self.params.dx, axis=1), dx=self.params.dy)
         
         return energy
     
-    if HAVE_NUMBA:
-        @staticmethod
-        @njit(parallel=True, fastmath=True, cache=True)
-        def _compute_gradient_numba(f):
-            """Numba-optimized gradient computation"""
-            ny, nx = f.shape
-            grad_x = np.zeros((ny, nx))
-            grad_y = np.zeros((ny, nx))
-            
-            for i in prange(ny):
-                im1 = (i - 1) % ny
-                ip1 = (i + 1) % ny
-                for j in prange(nx):
-                    jm1 = (j - 1) % nx
-                    jp1 = (j + 1) % nx
-                    
-                    grad_x[i, j] = (f[i, jp1] - f[i, jm1]) / 2.0
-                    grad_y[i, j] = (f[ip1, j] - f[im1, j]) / 2.0
-            
-            return grad_x, grad_y
-    
-    def get_energy_history(self):
-        """Return energy evolution data."""
-        times = np.arange(len(self.energy_history)) * self.params.dt
-        return times, np.array(self.energy_history)
+    def update_step(self, eta_m, eta_t, step):
+        """Perform one time step with adaptive time stepping"""
+        # Record old energy
+        old_energy = self.compute_energy(eta_m, eta_t)
+        
+        # Take step
+        eta_m_new, eta_t_new = self.step_function(eta_m, eta_t)
+        
+        # Compute new energy
+        new_energy = self.compute_energy(eta_m_new, eta_t_new)
+        
+        # Adjust time step based on energy change
+        self.adaptive_stepper.adjust_time_step(new_energy, old_energy)
+        
+        # Record energy
+        time = step * self.params.dt
+        self.adaptive_stepper.record_energy(new_energy, time)
+        self.energy_history.append(new_energy)
+        self.time_history.append(time)
+        
+        return eta_m_new, eta_t_new
 
 # ============================================================================
-# OPTIMIZED SIMULATION ENGINE WITH PERFORMANCE METRICS
+# VISUALIZATION TOOLS
 # ============================================================================
 
-class OptimizedNanotwinSimulation:
-    """Optimized simulation engine with multiple solver options."""
+class VisualizationTools:
+    """Tools for creating visualizations"""
     
-    def __init__(self, material, twin_width, temperature, Lx, Ly, Nx, Ny, 
-                 t_max, output_interval, colorscale, solver_type='numba'):
-        # Initialize parameters
-        self.params = SimulationParameters(
-            material, twin_width, temperature, Lx, Ly, Nx, Ny, 
-            t_max, output_interval, solver_type
-        )
-        
-        # Initialize evolution
-        self.evolution = FastPhaseFieldEvolution(self.params)
-        
-        # Visualization and export
-        self.colorscale = colorscale
-        self.output_dir = tempfile.mkdtemp(prefix=f"nanotwin_{material}_{solver_type}_")
-        
-        # Initialize fields
-        self.eta_m, self.eta_t = self.evolution.initialize_fields()
-        
-        # Data storage
-        self.data_history = []
-        self.snapshot_paths = []
-        self.export_files = []
-        
-        # Performance metrics
-        self.step_times = []
-        self.iteration_count = 0
-        self.solver_type = solver_type
-        
-        # Check if Numba is available but not selected
-        if solver_type == 'numba' and not HAVE_NUMBA:
-            st.warning("Numba not available, falling back to Python solver")
-            self.solver_type = 'python'
-    
-    def run(self, progress_callback=None, status_callback=None):
-        """Run the simulation with performance optimization."""
-        import time
-        
-        steps = self.params.total_steps
-        
-        for step in range(steps + 1):
-            t = step * self.params.dt
-            start_time = time.time()
-            
-            # Update phase fields
-            self.eta_m, self.eta_t = self.evolution.update_step(self.eta_m, self.eta_t)
-            
-            # Save output at intervals
-            if step % self.params.output_interval == 0 or step == steps:
-                self._save_output(step, t)
-                
-                # Call progress callback if provided
-                if progress_callback:
-                    progress = min(step / steps, 1.0)
-                    progress_callback(progress)
-                
-                # Call status callback if provided
-                if status_callback:
-                    energy = self.evolution.compute_energy(self.eta_m, self.eta_t)
-                    dt_adaptive = self.evolution.adaptive_dt
-                    status_callback(step, steps, t, energy, dt_adaptive)
-            
-            # Track performance
-            end_time = time.time()
-            self.step_times.append(end_time - start_time)
-            self.iteration_count += 1
-        
-        return self.data_history
-    
-    def _save_output(self, step, time):
-        """Save output data for current step."""
-        # Store data for visualization
-        self.data_history.append({
-            'step': step,
-            'time': time,
-            'eta_m': self.eta_m.copy(),
-            'eta_t': self.eta_t.copy(),
-            'energy': self.evolution.compute_energy(self.eta_m, self.eta_t)
-        })
-        
-        # Create snapshot (less frequent to save time)
-        if step % (self.params.output_interval * 5) == 0 or step == self.params.total_steps:
-            self._create_snapshot(step, time)
-    
-    def _create_snapshot(self, step, time):
-        """Create and save snapshot."""
+    @staticmethod
+    def create_snapshot(eta_m, eta_t, params, time, colorscale='viridis'):
+        """Create matplotlib snapshot"""
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         
         # Matrix phase
         im1 = axes[0].imshow(
-            self.eta_m, 
-            extent=[0, self.params.Lx*1e9, 0, self.params.Ly*1e9], 
+            eta_m, 
+            extent=[0, params.Lx*1e9, 0, params.Ly*1e9], 
             origin='lower', 
-            cmap=self.colorscale,
+            cmap=colorscale,
             vmin=0, vmax=1
         )
         axes[0].set_title(f'Matrix (η_m)\nTime: {time*1e9:.2f} ns')
@@ -985,10 +681,10 @@ class OptimizedNanotwinSimulation:
         
         # Twin phase
         im2 = axes[1].imshow(
-            self.eta_t, 
-            extent=[0, self.params.Lx*1e9, 0, self.params.Ly*1e9], 
+            eta_t, 
+            extent=[0, params.Lx*1e9, 0, params.Ly*1e9], 
             origin='lower', 
-            cmap=self.colorscale,
+            cmap=colorscale,
             vmin=0, vmax=1
         )
         axes[1].set_title(f'Twin (η_t)\nTime: {time*1e9:.2f} ns')
@@ -997,8 +693,8 @@ class OptimizedNanotwinSimulation:
         
         # Sum
         im3 = axes[2].imshow(
-            self.eta_m + self.eta_t, 
-            extent=[0, self.params.Lx*1e9, 0, self.params.Ly*1e9], 
+            eta_m + eta_t, 
+            extent=[0, params.Lx*1e9, 0, params.Ly*1e9], 
             origin='lower', 
             cmap='RdYlBu',
             vmin=0.95, vmax=1.05
@@ -1008,53 +704,222 @@ class OptimizedNanotwinSimulation:
         plt.colorbar(im3, ax=axes[2])
         
         plt.tight_layout()
-        snapshot_path = os.path.join(self.output_dir, f'snapshot_{step:06d}.png')
-        plt.savefig(snapshot_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        self.snapshot_paths.append(snapshot_path)
+        return fig
     
-    def get_performance_stats(self):
-        """Get performance statistics."""
+    @staticmethod
+    def create_interactive_plot(data_history, params, colorscale='viridis'):
+        """Create interactive Plotly visualization"""
+        if not data_history:
+            return None
+        
+        fig = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=('Matrix (η_m)', 'Twin (η_t)'),
+            horizontal_spacing=0.1
+        )
+        
+        # First frame
+        first_data = data_history[0]
+        x = np.linspace(0, params.Lx * 1e9, params.Nx)
+        y = np.linspace(0, params.Ly * 1e9, params.Ny)
+        
+        fig.add_trace(
+            go.Heatmap(
+                x=x, y=y, z=first_data['eta_m'],
+                colorscale=colorscale,
+                zmin=0, zmax=1,
+                colorbar=dict(x=0.45, title='η_m')
+            ),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Heatmap(
+                x=x, y=y, z=first_data['eta_t'],
+                colorscale=colorscale,
+                zmin=0, zmax=1,
+                colorbar=dict(x=1.02, title='η_t')
+            ),
+            row=1, col=2
+        )
+        
+        # Create frames
+        frames = []
+        for i, data in enumerate(data_history):
+            frame = go.Frame(
+                data=[
+                    go.Heatmap(z=data['eta_m'], colorscale=colorscale),
+                    go.Heatmap(z=data['eta_t'], colorscale=colorscale)
+                ],
+                name=f"frame_{i}",
+                layout=go.Layout(
+                    title_text=f"Time: {data['time']*1e9:.2f} ns"
+                )
+            )
+            frames.append(frame)
+        
+        # Create slider
+        sliders = [{
+            'active': 0,
+            'currentvalue': {'prefix': 'Time: ', 'suffix': ' ns'},
+            'pad': {'t': 50},
+            'steps': [
+                {
+                    'args': [[f.name], {'frame': {'duration': 300, 'redraw': True}}],
+                    'label': f"{data['time']*1e9:.2f}",
+                    'method': 'animate'
+                }
+                for data in data_history
+            ]
+        }]
+        
+        # Update layout
+        fig.update_layout(
+            title=f"Nanotwin Evolution - {params.material_name}",
+            height=500,
+            width=1000,
+            sliders=sliders,
+            updatemenus=[{
+                'buttons': [
+                    {'args': [None, {'frame': {'duration': 500}}], 'label': '▶ Play', 'method': 'animate'},
+                    {'args': [[None], {'frame': {'duration': 0}}], 'label': '⏸ Pause', 'method': 'animate'}
+                ]
+            }]
+        )
+        
+        fig.update_xaxes(title_text="x (nm)", row=1, col=1)
+        fig.update_yaxes(title_text="y (nm)", row=1, col=1)
+        fig.update_xaxes(title_text="x (nm)", row=1, col=2)
+        
+        fig.frames = frames
+        return fig
+
+# ============================================================================
+# MAIN SIMULATION ENGINE
+# ============================================================================
+
+class FastNanotwinSimulation:
+    """Main simulation engine"""
+    
+    def __init__(self, material, twin_width, temperature, Lx, Ly, Nx, Ny,
+                 t_max, output_interval, colorscale, solver_type='numpy'):
+        # Initialize parameters
+        self.params = SimulationParameters(
+            material, twin_width, temperature, Lx, Ly, Nx, Ny,
+            t_max, output_interval, solver_type
+        )
+        
+        # Initialize solver
+        self.solver = OptimizedPhaseFieldSolver(self.params)
+        
+        # Initialize fields
+        self.eta_m, self.eta_t = self.solver.initialize_fields()
+        
+        # Visualization
+        self.visualization = VisualizationTools()
+        self.colorscale = colorscale
+        
+        # Data storage
+        self.output_dir = tempfile.mkdtemp(prefix=f"nanotwin_{material}_")
+        self.data_history = []
+        self.snapshot_paths = []
+        
+        # Performance tracking
+        self.start_time = None
+        self.step_times = []
+        
+    def run(self, progress_callback=None, status_callback=None):
+        """Run the simulation"""
+        import time
+        self.start_time = time.time()
+        
+        steps = self.params.total_steps
+        
+        for step in range(steps + 1):
+            step_start = time.time()
+            t = step * self.params.dt
+            
+            # Update phase fields
+            self.eta_m, self.eta_t = self.solver.update_step(self.eta_m, self.eta_t, step)
+            
+            # Save output at intervals
+            if step % self.params.output_interval == 0 or step == steps:
+                self._save_output(step, t)
+                
+                # Update progress
+                if progress_callback:
+                    progress = min(step / steps, 1.0)
+                    progress_callback(progress)
+                
+                # Update status
+                if status_callback:
+                    energy = self.solver.compute_energy(self.eta_m, self.eta_t)
+                    elapsed = time.time() - self.start_time
+                    steps_per_sec = step / elapsed if elapsed > 0 else 0
+                    status_callback(step, steps, t, energy, steps_per_sec)
+            
+            # Track step time
+            self.step_times.append(time.time() - step_start)
+        
+        return self.data_history
+    
+    def _save_output(self, step, time):
+        """Save output data"""
+        # Store data
+        self.data_history.append({
+            'step': step,
+            'time': time,
+            'eta_m': self.eta_m.copy(),
+            'eta_t': self.eta_t.copy(),
+            'energy': self.solver.compute_energy(self.eta_m, self.eta_t)
+        })
+        
+        # Create snapshot (less frequent for performance)
+        if step % (self.params.output_interval * 5) == 0 or step == self.params.total_steps:
+            fig = self.visualization.create_snapshot(
+                self.eta_m, self.eta_t, self.params, time, self.colorscale
+            )
+            snapshot_path = os.path.join(self.output_dir, f'snapshot_{step:06d}.png')
+            fig.savefig(snapshot_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            self.snapshot_paths.append(snapshot_path)
+    
+    def get_results(self):
+        """Get simulation results"""
+        return {
+            'data_history': self.data_history,
+            'energy_history': self.solver.energy_history,
+            'time_history': self.solver.time_history,
+            'snapshots': self.snapshot_paths,
+            'params': self.params,
+            'performance': self._get_performance_stats()
+        }
+    
+    def _get_performance_stats(self):
+        """Get performance statistics"""
         if not self.step_times:
             return {}
         
         times = np.array(self.step_times)
-        return {
-            'total_steps': self.iteration_count,
-            'total_time': np.sum(times),
-            'avg_step_time': np.mean(times),
-            'std_step_time': np.std(times),
-            'min_step_time': np.min(times),
-            'max_step_time': np.max(times),
-            'steps_per_second': 1.0 / np.mean(times) if np.mean(times) > 0 else 0,
-            'solver_type': self.solver_type,
-            'numba_available': HAVE_NUMBA,
-            'adaptive_dt': self.evolution.adaptive_dt
-        }
-    
-    def get_results(self):
-        """Get simulation results."""
-        times, energies = self.evolution.get_energy_history()
+        total_time = np.sum(times)
         
         return {
-            'data_history': self.data_history,
-            'energy_history': energies,
-            'time_history': times,
-            'snapshots': self.snapshot_paths,
-            'params': self.params,
-            'performance': self.get_performance_stats(),
-            'output_dir': self.output_dir
+            'total_time': total_time,
+            'avg_step_time': np.mean(times),
+            'steps_per_second': len(times) / total_time if total_time > 0 else 0,
+            'solver_type': self.params.solver_type,
+            'numba_available': NUMBA_AVAILABLE
         }
     
     def cleanup(self):
-        """Clean up temporary files."""
+        """Clean up temporary files"""
         try:
             shutil.rmtree(self.output_dir)
         except:
             pass
 
 # ============================================================================
-# STREAMLIT APPLICATION WITH PERFORMANCE OPTIONS
+# STREAMLIT APPLICATION
 # ============================================================================
 
 def main():
@@ -1069,7 +934,6 @@ def main():
         padding: 1rem;
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
         border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     .performance-badge {
         display: inline-block;
@@ -1079,57 +943,45 @@ def main():
         font-weight: bold;
         margin: 0.25rem;
     }
-    .badge-numba {
-        background-color: #00a8ff;
-        color: white;
-    }
-    .badge-fft {
-        background-color: #9c88ff;
-        color: white;
-    }
-    .badge-multigrid {
-        background-color: #fbc531;
-        color: black;
-    }
-    .badge-python {
-        background-color: #4cd137;
-        color: white;
-    }
+    .badge-fast { background-color: #00a8ff; color: white; }
+    .badge-faster { background-color: #9c88ff; color: white; }
+    .badge-fastest { background-color: #fbc531; color: black; }
     </style>
     """, unsafe_allow_html=True)
     
     # Header
-    st.markdown('<h1 class="main-header">⚡ High-Performance Nanotwin Simulation</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">⚡ Fast Nanotwin Phase Field Simulation</h1>', unsafe_allow_html=True)
     
-    # Performance information
+    # Performance info
     col1, col2, col3 = st.columns(3)
     with col1:
-        if HAVE_NUMBA:
-            st.success(f"✅ Numba JIT: Available (v{nb.__version__})")
+        if NUMBA_AVAILABLE:
+            st.success(f"✅ Numba JIT: Available")
         else:
-            st.warning("⚠️ Numba JIT: Not installed (using Python fallback)")
+            st.warning("⚠️ Numba: Not installed")
     with col2:
         st.info(f"NumPy: v{np.__version__}")
     with col3:
-        st.info(f"Python: {'.'.join(map(str, __import__('sys').version_info[:3]))}")
+        import sys
+        st.info(f"Python: {sys.version.split()[0]}")
     
     # Introduction
-    with st.expander("🚀 Performance Features", expanded=True):
+    with st.expander("🚀 About This Simulation", expanded=True):
         st.markdown("""
-        ### **Acceleration Technologies:**
+        ### **High-Performance Phase Field Simulation**
         
-        | Technology | Speedup | Best For | Description |
-        |------------|---------|----------|-------------|
-        | **Numba JIT** | 10-100x | Medium grids | Just-In-Time compilation of numerical kernels |
-        | **FFT Spectral** | 5-20x | Large grids | Fast Fourier Transform for spectral methods |
-        | **Multigrid** | 2-10x | Very large grids | Hierarchical solving for implicit schemes |
-        | **Adaptive Δt** | 2-5x | All cases | Automatic time step adjustment |
+        This application simulates nanotwin detwinning in FCC metals using optimized algorithms:
         
-        ### **Performance Tips:**
-        1. Use **Numba** for grids up to 500×500
-        2. Use **FFT** for grids larger than 500×500  
-        3. Enable **adaptive time stepping** for stability
-        4. Reduce **output frequency** for faster runs
+        **Available Solvers:**
+        1. **Standard NumPy** - Reliable, works everywhere
+        2. **Numba JIT** - 10-100x faster (if Numba is installed)
+        3. **FFT Spectral** - Fast for large grids
+        
+        **Performance Features:**
+        - Adaptive time stepping for stability
+        - Optimized memory usage
+        - Real-time progress tracking
+        - Multiple visualization options
         """)
     
     # Sidebar
@@ -1143,28 +995,25 @@ def main():
     )
     
     # Solver selection
-    st.sidebar.markdown("### ⚡ Solver Options")
+    st.sidebar.markdown("### ⚡ Solver Type")
     
-    solver_options = ["numba", "fft", "multigrid", "python"]
-    solver_descriptions = {
-        "numba": "Numba JIT (Fastest for medium grids)",
-        "fft": "FFT Spectral (Best for large grids)",
-        "multigrid": "Multigrid (Stable for implicit)",
-        "python": "Pure Python (Fallback)"
-    }
+    solver_options = []
+    if NUMBA_AVAILABLE:
+        solver_options.append(("numba", "Numba JIT (Fastest)"))
+    solver_options.append(("fft", "FFT Spectral (Large grids)"))
+    solver_options.append(("numpy", "Standard NumPy (Reliable)"))
     
     solver_type = st.sidebar.selectbox(
-        "Solver Type",
-        options=solver_options,
-        format_func=lambda x: f"{x.upper()}: {solver_descriptions[x]}",
-        index=0 if HAVE_NUMBA else 3
+        "Select Solver",
+        options=[opt[0] for opt in solver_options],
+        format_func=lambda x: dict(solver_options)[x],
+        index=0
     )
     
     # Performance options
-    with st.sidebar.expander("🎯 Performance Settings"):
+    with st.sidebar.expander("🎯 Performance"):
         adaptive_dt = st.checkbox("Adaptive Time Step", value=True)
         vectorized = st.checkbox("Vectorized Operations", value=True)
-        reduce_output = st.checkbox("Reduce Output Frequency", value=False)
     
     # Colorscale
     colorscale_options = {
@@ -1179,49 +1028,40 @@ def main():
     
     colorscale = st.sidebar.selectbox("Colorscale", list(colorscale_options.keys()), index=0)
     
-    # Geometry parameters
+    # Geometry
     st.sidebar.markdown("### 📏 Geometry")
     
     twin_width_nm = st.sidebar.slider("Twin Width (nm)", 1.0, 50.0, 10.0)
-    Lx_nm = st.sidebar.slider("Domain Width (nm)", 20.0, 500.0, 100.0)
-    Ly_nm = st.sidebar.slider("Domain Height (nm)", 20.0, 500.0, 100.0)
+    Lx_nm = st.sidebar.slider("Domain Width (nm)", 20.0, 200.0, 100.0)
+    Ly_nm = st.sidebar.slider("Domain Height (nm)", 20.0, 200.0, 100.0)
     
-    # Grid resolution with solver-specific recommendations
-    if solver_type == "fft":
-        grid_sizes = [64, 128, 256, 512]
-        default_idx = 1  # 128
-    elif solver_type == "multigrid":
-        grid_sizes = [64, 128, 256, 512]
-        default_idx = 1  # 128
+    # Grid resolution
+    if solver_type == 'fft':
+        grid_sizes = [64, 128, 256]
+        default_idx = 1
     else:
-        grid_sizes = [64, 128, 256, 512, 1024]
-        default_idx = 1  # 128
+        grid_sizes = [64, 128, 256, 512]
+        default_idx = 1
     
     Nx = st.sidebar.selectbox("Grid Points X", grid_sizes, index=default_idx)
     Ny = st.sidebar.selectbox("Grid Points Y", grid_sizes, index=default_idx)
     
-    # Physical parameters
+    # Physics
     st.sidebar.markdown("### 🔬 Physics")
     
     temperature = st.sidebar.slider("Temperature (K)", 100, 1000, 500)
-    t_max_ns = st.sidebar.slider("Simulation Time (ns)", 0.1, 10.0, 1.0)
+    t_max_ns = st.sidebar.slider("Simulation Time (ns)", 0.1, 5.0, 1.0)
+    output_interval = st.sidebar.slider("Output Interval", 10, 200, 50)
     
-    if reduce_output:
-        output_interval = st.sidebar.slider("Output Interval", 100, 1000, 200)
-    else:
-        output_interval = st.sidebar.slider("Output Interval", 10, 200, 50)
-    
-    # Advanced options
+    # Advanced
     with st.sidebar.expander("🔧 Advanced"):
         random_seed = st.number_input("Random Seed", 0, 1000, 42)
         np.random.seed(random_seed)
-        
-        anisotropy = st.slider("Anisotropy Strength", 0.0, 1.0, 0.5)
     
     # Run button
     st.sidebar.markdown("---")
     run_button = st.sidebar.button(
-        "🚀 Run High-Performance Simulation", 
+        "🚀 Run Simulation",
         type="primary",
         use_container_width=True
     )
@@ -1233,178 +1073,134 @@ def main():
     
     # Main content
     if run_button:
+        # Display configuration
+        st.markdown("### 🔬 Simulation Configuration")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Material:** {material}")
+            st.write(f"**Solver:** {solver_type}")
+            st.write(f"**Domain:** {Lx_nm:.1f} nm × {Ly_nm:.1f} nm")
+            st.write(f"**Grid:** {Nx} × {Ny}")
+        
+        with col2:
+            st.write(f"**Twin Width:** {twin_width_nm:.1f} nm")
+            st.write(f"**Temperature:** {temperature} K")
+            st.write(f"**Total Time:** {t_max_ns:.2f} ns")
+            st.write(f"**Output Interval:** {output_interval}")
+        
         # Performance estimate
         st.markdown("### 📊 Performance Estimate")
         
-        col1, col2, col3, col4 = st.columns(4)
-        
+        col1, col2, col3 = st.columns(3)
         with col1:
+            if solver_type == 'numba':
+                st.markdown('<div class="performance-badge badge-fastest">FASTEST: Numba JIT</div>', unsafe_allow_html=True)
+            elif solver_type == 'fft':
+                st.markdown('<div class="performance-badge badge-faster">FASTER: FFT Spectral</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="performance-badge badge-fast">FAST: Standard NumPy</div>', unsafe_allow_html=True)
+        
+        with col2:
             grid_size = Nx * Ny
             st.metric("Grid Size", f"{grid_size:,}")
         
-        with col2:
-            if solver_type == "numba" and HAVE_NUMBA:
-                est_speed = "10-100x"
-                badge_class = "badge-numba"
-            elif solver_type == "fft":
-                est_speed = "5-20x"
-                badge_class = "badge-fft"
-            elif solver_type == "multigrid":
-                est_speed = "2-10x"
-                badge_class = "badge-multigrid"
-            else:
-                est_speed = "1x"
-                badge_class = "badge-python"
-            
-            st.markdown(f"""
-            <div class="performance-badge {badge_class}">
-            {solver_type.upper()}: {est_speed}
-            </div>
-            """, unsafe_allow_html=True)
-        
         with col3:
-            total_steps_est = int(t_max / 1e-12)  # Estimate based on 1ps time step
-            st.metric("Estimated Steps", f"{total_steps_est:,}")
-        
-        with col4:
-            if solver_type == "python":
-                est_time = total_steps_est * 0.01  # 10ms per step
-            else:
-                est_time = total_steps_est * 0.001  # 1ms per step
-            
-            st.metric("Est. Time", f"{est_time:.1f}s")
+            est_steps = int(t_max / 1e-12)
+            st.metric("Est. Steps", f"{est_steps:,}")
         
         # Initialize simulation
-        with st.spinner(f"🚀 Initializing {solver_type.upper()} solver..."):
+        with st.spinner("🚀 Initializing simulation..."):
             try:
-                sim = OptimizedNanotwinSimulation(
+                sim = FastNanotwinSimulation(
                     material, twin_width, temperature,
                     Lx, Ly, Nx, Ny, t_max,
                     output_interval, colorscale_options[colorscale],
                     solver_type=solver_type
                 )
                 
-                # Display simulation info
-                st.markdown("### 🔬 Simulation Configuration")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write(f"**Material:** {material}")
-                    st.write(f"**Solver:** {solver_type.upper()}")
-                    st.write(f"**Domain:** {Lx_nm:.1f} nm × {Ly_nm:.1f} nm")
-                    st.write(f"**Grid:** {Nx} × {Ny} ({Nx*Ny:,} points)")
-                
-                with col2:
-                    st.write(f"**Twin Width:** {twin_width_nm:.1f} nm")
-                    st.write(f"**Temperature:** {temperature} K")
-                    st.write(f"**Total Time:** {t_max_ns:.2f} ns")
-                    st.write(f"**Time Step:** {sim.params.dt:.2e} s")
-                
                 # Progress tracking
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                performance_text = st.empty()
+                perf_text = st.empty()
                 
                 # Run simulation
-                with st.spinner(f"⏳ Running {solver_type.upper()} simulation..."):
+                with st.spinner("⏳ Running simulation..."):
                     import time
                     total_start = time.time()
                     
                     def update_progress(progress):
                         progress_bar.progress(progress)
                     
-                    def update_status(step, total_steps, t, energy, dt_adaptive):
+                    def update_status(step, total_steps, t, energy, steps_per_sec):
                         elapsed = time.time() - total_start
-                        steps_per_sec = step / elapsed if elapsed > 0 else 0
+                        eta = (total_steps - step) / steps_per_sec if steps_per_sec > 0 else 0
                         
                         status_text.markdown(f"""
-                        **Simulation Progress:**
-                        - Step: {step:,} / {total_steps:,} ({step/total_steps*100:.1f}%)
-                        - Time: {t*1e9:.3f} ns
-                        - Energy: {energy:.2e} J
-                        - Δt: {dt_adaptive:.2e} s
+                        **Progress:** {step:,} / {total_steps:,} steps ({step/total_steps*100:.1f}%)
+                        **Time:** {t*1e9:.3f} ns
+                        **Energy:** {energy:.2e} J
                         """)
                         
-                        performance_text.markdown(f"""
+                        perf_text.markdown(f"""
                         **Performance:**
                         - Elapsed: {elapsed:.1f}s
                         - Steps/sec: {steps_per_sec:.0f}
-                        - Est. remaining: {(total_steps - step)/steps_per_sec if steps_per_sec > 0 else 0:.1f}s
+                        - ETA: {eta:.1f}s
                         """)
                     
-                    # Run the simulation
+                    # Run simulation
                     data_history = sim.run(update_progress, update_status)
                     
                     total_time = time.time() - total_start
                 
-                # Success message with performance stats
+                # Success
                 results = sim.get_results()
                 perf_stats = results['performance']
                 
                 st.success(f"""
                 ✅ Simulation completed in {total_time:.1f}s!
-                - {perf_stats.get('total_steps', 0):,} steps processed
+                - Processed {len(data_history)} time steps
                 - Average step time: {perf_stats.get('avg_step_time', 0)*1000:.2f}ms
                 - Steps per second: {perf_stats.get('steps_per_second', 0):.0f}
                 """)
                 
-                # Performance comparison
-                st.markdown("### 📈 Performance Analysis")
-                
-                if perf_stats:
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Total Time", f"{perf_stats['total_time']:.2f}s")
-                    with col2:
-                        st.metric("Avg Step", f"{perf_stats['avg_step_time']*1000:.2f}ms")
-                    with col3:
-                        st.metric("Steps/sec", f"{perf_stats['steps_per_second']:.0f}")
-                    with col4:
-                        efficiency = (perf_stats['steps_per_second'] / (Nx * Ny)) * 1e6
-                        st.metric("Efficiency", f"{efficiency:.1f}")
-                
-                # Create tabs for results
-                tab1, tab2, tab3 = st.tabs(["📊 Results", "📈 Analysis", "💾 Export"])
+                # Results tabs
+                tab1, tab2, tab3 = st.tabs(["📊 Visualization", "📈 Analysis", "💾 Export"])
                 
                 with tab1:
-                    # Interactive visualization
+                    # Interactive plot
                     if data_history:
                         st.markdown("#### Phase Field Evolution")
-                        
-                        # Simplified visualization for speed
-                        fig = make_subplots(rows=1, cols=2, subplot_titles=('Matrix η_m', 'Twin η_t'))
-                        
-                        last_data = data_history[-1]
-                        x = np.linspace(0, sim.params.Lx * 1e9, sim.params.Nx)
-                        y = np.linspace(0, sim.params.Ly * 1e9, sim.params.Ny)
-                        
-                        fig.add_trace(
-                            go.Heatmap(x=x, y=y, z=last_data['eta_m'], colorscale=colorscale),
-                            row=1, col=1
+                        plotly_fig = VisualizationTools.create_interactive_plot(
+                            data_history, sim.params, colorscale_options[colorscale]
                         )
-                        fig.add_trace(
-                            go.Heatmap(x=x, y=y, z=last_data['eta_t'], colorscale=colorscale),
-                            row=1, col=2
-                        )
+                        if plotly_fig:
+                            st.plotly_chart(plotly_fig, use_container_width=True)
                         
-                        fig.update_layout(height=400)
-                        st.plotly_chart(fig, use_container_width=True)
+                        # Snapshots
+                        st.markdown("#### Snapshots")
+                        if sim.snapshot_paths:
+                            cols = st.columns(3)
+                            for i, path in enumerate(sim.snapshot_paths[-3:]):  # Last 3 snapshots
+                                with cols[i % 3]:
+                                    st.image(path, use_column_width=True)
                 
                 with tab2:
                     # Energy analysis
-                    if len(results['energy_history']) > 0:
+                    if results['energy_history']:
                         st.markdown("#### Energy Evolution")
                         
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=results['time_history'] * 1e9,
+                            x=[t*1e9 for t in results['time_history']],
                             y=results['energy_history'],
                             mode='lines',
                             name='Free Energy'
                         ))
                         
                         fig.update_layout(
-                            title='Free Energy Evolution',
+                            title='Free Energy vs Time',
                             xaxis_title='Time (ns)',
                             yaxis_title='Energy (J)',
                             height=400
@@ -1424,88 +1220,101 @@ def main():
                 
                 with tab3:
                     # Export
-                    st.markdown("#### Export Results")
+                    st.markdown("#### Export Data")
                     
                     # Create summary
                     summary = {
                         'material': material,
                         'solver': solver_type,
-                        'performance': perf_stats,
                         'parameters': {
                             'twin_width_nm': twin_width_nm,
                             'temperature': temperature,
                             'domain_nm': [Lx_nm, Ly_nm],
-                            'grid': [Nx, Ny]
-                        }
+                            'grid': [Nx, Ny],
+                            'total_time_ns': t_max_ns
+                        },
+                        'performance': perf_stats,
+                        'energy_history': results['energy_history'],
+                        'time_history': results['time_history']
                     }
                     
+                    # JSON export
+                    json_str = json.dumps(summary, indent=2)
                     st.download_button(
                         label="📄 Download Summary (JSON)",
-                        data=json.dumps(summary, indent=2),
-                        file_name=f"nanotwin_{material}_{solver_type}_summary.json",
+                        data=json_str,
+                        file_name=f"nanotwin_{material}_{solver_type}.json",
                         mime="application/json"
                     )
+                    
+                    # CSV export for energy data
+                    if results['energy_history']:
+                        import io
+                        csv_buffer = io.StringIO()
+                        csv_buffer.write("time_ns,energy_J\n")
+                        for t, e in zip(results['time_history'], results['energy_history']):
+                            csv_buffer.write(f"{t*1e9},{e}\n")
+                        
+                        st.download_button(
+                            label="📈 Download Energy Data (CSV)",
+                            data=csv_buffer.getvalue(),
+                            file_name=f"nanotwin_{material}_energy.csv",
+                            mime="text/csv"
+                        )
                 
                 # Cleanup
                 sim.cleanup()
                 
             except Exception as e:
                 st.error(f"❌ Simulation failed: {str(e)}")
-                st.exception(e)
+                import traceback
+                st.code(traceback.format_exc())
     
     else:
         # Welcome screen
         st.markdown("""
-        ### 🚀 High-Performance Phase Field Simulation
+        ## Welcome to the Fast Nanotwin Simulator!
         
-        This enhanced version uses advanced numerical techniques for faster simulations:
-        
-        **Available Acceleration Methods:**
-        
-        1. **Numba JIT Compilation** - Automatic compilation of Python to machine code
-        2. **FFT Spectral Methods** - Fast Fourier Transform for solving PDEs  
-        3. **Multigrid Solvers** - Hierarchical methods for large systems
-        4. **Adaptive Time Stepping** - Automatic Δt adjustment for stability
-        
-        **Expected Speedups:**
-        - Small grids (100×100): **2-5x faster**
-        - Medium grids (300×300): **10-50x faster**  
-        - Large grids (500×500+): **50-100x faster**
+        This tool simulates the detwinning of nanotwins in FCC metals using optimized phase field methods.
         
         **To get started:**
-        1. Select solver type in sidebar (Numba recommended)
-        2. Configure simulation parameters
-        3. Click "Run High-Performance Simulation"
+        1. Select a material and solver type in the sidebar
+        2. Configure the simulation parameters
+        3. Click "Run Simulation"
+        
+        **Available Solvers:**
+        - **Numba JIT**: Fastest option (requires Numba installation)
+        - **FFT Spectral**: Best for large grids
+        - **Standard NumPy**: Works everywhere
+        
+        **Performance Tips:**
+        - Use smaller grids for faster simulations
+        - Enable adaptive time stepping for stability
+        - Reduce output frequency for speed
         """)
         
-        # Quick benchmark
-        if HAVE_NUMBA:
-            st.markdown("#### 🏎️ Quick Benchmark")
-            
-            if st.button("Run Quick Benchmark"):
-                with st.spinner("Running benchmark..."):
-                    import time
-                    
-                    # Small grid benchmark
-                    grid_sizes = [64, 128, 256]
-                    results = []
-                    
-                    for size in grid_sizes:
-                        # Time a small simulation
-                        start = time.time()
-                        # Create dummy simulation to test
-                        eta = np.random.rand(size, size)
-                        for _ in range(100):
-                            # Simple operation
-                            eta = 0.5 * (eta + np.roll(eta, 1, axis=0) + np.roll(eta, 1, axis=1))
-                        elapsed = time.time() - start
-                        results.append((size, elapsed))
-                    
-                    # Display results
-                    st.markdown("**Benchmark Results:**")
-                    for size, elapsed in results:
-                        ops_per_sec = (size * size * 100) / elapsed
-                        st.write(f"- Grid {size}×{size}: {ops_per_sec:,.0f} operations/sec")
+        # Quick examples
+        st.markdown("#### Quick Examples")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **Copper Nanotwin (Fast)**
+            - Material: Cu
+            - Grid: 128×128
+            - Time: 1 ns
+            - Solver: Numba
+            """)
+        
+        with col2:
+            st.markdown("""
+            **Aluminum Study (Accurate)**
+            - Material: Al
+            - Grid: 256×256
+            - Time: 2 ns
+            - Solver: FFT
+            """)
 
 if __name__ == "__main__":
     main()
