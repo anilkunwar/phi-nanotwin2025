@@ -13,15 +13,16 @@ import torch
 from io import BytesIO
 import tempfile
 import os
-import meshio
 import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================================================
-# FIXED NUMBA-COMPATIBLE FUNCTIONS (WITH CORRECTED SIGNATURES)
+# FIXED NUMBA-COMPATIBLE FUNCTIONS
 # ============================================================================
 @njit(parallel=True)
 def compute_gradients_numba(field, dx):
-    """Numba-compatible gradient computation - fixed signature"""
+    """Numba-compatible gradient computation"""
     N = field.shape[0]
     gx = np.zeros((N, N))
     gy = np.zeros((N, N))
@@ -39,7 +40,7 @@ def compute_gradients_numba(field, dx):
 
 @njit(parallel=True)
 def compute_laplacian_numba(field, dx):
-    """Numba-compatible Laplacian computation - fixed signature"""
+    """Numba-compatible Laplacian computation"""
     N = field.shape[0]
     lap = np.zeros((N, N))
     
@@ -131,11 +132,43 @@ def compute_yield_stress_numba(h, sigma0, mu, b, nu):
     
     return sigma_y
 
+@njit(parallel=True)
+def compute_plastic_strain_numba(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy, 
+                                 gamma0_dot, m, dt, N):
+    """Numba-compatible plastic strain computation - FIXED INDEXING ERROR"""
+    eps_p_xx_new = np.zeros((N, N))
+    eps_p_yy_new = np.zeros((N, N))
+    eps_p_xy_new = np.zeros((N, N))
+    
+    for i in prange(N):
+        for j in prange(N):
+            if sigma_eq[i, j] > sigma_y[i, j]:
+                # Overstress ratio
+                overstress = (sigma_eq[i, j] - sigma_y[i, j]) / sigma_y[i, j]
+                
+                # Strain rate magnitude using Perzyna model
+                gamma_dot = gamma0_dot * (overstress)**m
+                
+                # Plastic strain increment (associated flow rule)
+                stress_dev = 2/3 * gamma_dot * dt
+                
+                # Update plastic strains
+                eps_p_xx_new[i, j] = eps_p_xx[i, j] + stress_dev
+                eps_p_yy_new[i, j] = eps_p_yy[i, j] - stress_dev  # Volume preserving
+                eps_p_xy_new[i, j] = eps_p_xy[i, j]  # No shear component in simplified model
+            else:
+                # No plastic strain if not yielding
+                eps_p_xx_new[i, j] = eps_p_xx[i, j]
+                eps_p_yy_new[i, j] = eps_p_yy[i, j]
+                eps_p_xy_new[i, j] = eps_p_xy[i, j]
+    
+    return eps_p_xx_new, eps_p_yy_new, eps_p_xy_new
+
 # ============================================================================
-# ENHANCED PHYSICS MODELS WITH INITIAL GEOMETRY VISUALIZATION
+# ENHANCED PHYSICS MODELS WITH ERROR HANDLING
 # ============================================================================
 class MaterialProperties:
-    """Enhanced material properties database"""
+    """Enhanced material properties database with validation"""
     
     @staticmethod
     def get_cu_properties():
@@ -162,14 +195,28 @@ class MaterialProperties:
                 'gamma0_dot': 1e-3,
                 'm': 20,
                 'rho0': 1e12,
-            },
-            'thermal': {
-                'melting_temp': 1357.77,
-                'thermal_cond': 401,
-                'specific_heat': 385,
-                'thermal_expansion': 16.5e-6,
             }
         }
+    
+    @staticmethod
+    def validate_parameters(params):
+        """Validate simulation parameters"""
+        errors = []
+        warnings = []
+        
+        # Check parameter ranges
+        if params['dt'] <= 0:
+            errors.append("Time step dt must be positive")
+        if params['dx'] <= 0:
+            errors.append("Grid spacing dx must be positive")
+        if params['N'] < 32:
+            warnings.append("Grid resolution N < 32 may produce inaccurate results")
+        if params['twin_spacing'] < 5:
+            warnings.append("Twin spacing < 5nm may be physically unrealistic")
+        if params['applied_stress'] > 2e9:
+            warnings.append("Applied stress > 2GPa may cause unrealistic deformation")
+        
+        return errors, warnings
 
 class InitialGeometryVisualizer:
     """Class to create and visualize initial geometric conditions"""
@@ -187,13 +234,12 @@ class InitialGeometryVisualizer:
         eta2 = np.zeros((self.N, self.N))
         phi = np.zeros((self.N, self.N))
         
-        # Create grain boundary (vertical line at x = grain_boundary_pos)
+        # Create grain boundary
         for i in range(self.N):
             for j in range(self.N):
                 x_val = self.X[i, j]
                 dist_from_gb = x_val - grain_boundary_pos
                 
-                # Twin grain on left (eta1 = 1), twin-free grain on right (eta2 = 1)
                 if dist_from_gb < -gb_width:
                     eta1[i, j] = 1.0
                     eta2[i, j] = 0.0
@@ -201,99 +247,52 @@ class InitialGeometryVisualizer:
                     eta1[i, j] = 0.0
                     eta2[i, j] = 1.0
                 else:
-                    # Smooth transition at grain boundary
                     transition = 0.5 * (1 - np.tanh(dist_from_gb / (gb_width/3)))
                     eta1[i, j] = transition
                     eta2[i, j] = 1 - transition
         
-        # Create periodic twin structure only in the twin grain (eta1 > 0.5)
+        # Create periodic twin structure
         for i in range(self.N):
             for j in range(self.N):
                 if eta1[i, j] > 0.5:
-                    # Create periodic twins with specified spacing
                     phase = 2 * np.pi * self.Y[i, j] / twin_spacing
                     phi[i, j] = np.tanh(np.sin(phase) * 3.0)
         
         return phi, eta1, eta2
     
-    def create_multi_twin_geometry(self, twin_spacings=[15.0, 25.0, 35.0]):
-        """Create geometry with multiple twin spacings for comparison"""
-        phi, eta1, eta2 = self.create_twin_grain_geometry(twin_spacings[0])
+    def create_defect_geometry(self, twin_spacing=20.0, defect_type='dislocation', defect_pos=(0, 0), defect_radius=10.0):
+        """Create geometry with defects (dislocations, voids, etc.)"""
+        phi, eta1, eta2 = self.create_twin_grain_geometry(twin_spacing)
         
-        # Create regions with different twin spacings
-        region_height = self.N // len(twin_spacings)
-        
-        for idx, spacing in enumerate(twin_spacings):
-            y_start = idx * region_height
-            y_end = (idx + 1) * region_height if idx < len(twin_spacings) - 1 else self.N
-            
-            for i in range(y_start, y_end):
+        if defect_type == 'dislocation':
+            # Add dislocation by perturbing twin pattern
+            center_x, center_y = defect_pos
+            for i in range(self.N):
                 for j in range(self.N):
-                    if eta1[i, j] > 0.5:
-                        phase = 2 * np.pi * self.Y[i, j] / spacing
+                    dist = np.sqrt((self.X[i, j] - center_x)**2 + (self.Y[i, j] - center_y)**2)
+                    if dist < defect_radius and eta1[i, j] > 0.5:
+                        # Create dislocation core by shifting phase
+                        phase_shift = np.exp(-dist**2 / (defect_radius**2)) * np.pi
+                        phase = 2 * np.pi * self.Y[i, j] / twin_spacing + phase_shift
                         phi[i, j] = np.tanh(np.sin(phase) * 3.0)
         
-        return phi, eta1, eta2
-    
-    def create_curved_twin_geometry(self, twin_spacing=20.0, curvature_radius=100.0):
-        """Create geometry with curved twins"""
-        phi = np.zeros((self.N, self.N))
-        eta1 = np.ones((self.N, self.N))
-        eta2 = np.zeros((self.N, self.N))
-        
-        # Create curved twins using circular geometry
-        center_x = 0.0
-        center_y = 0.0
-        
-        for i in range(self.N):
-            for j in range(self.N):
-                # Calculate angle from center
-                dx = self.X[i, j] - center_x
-                dy = self.Y[i, j] - center_y
-                angle = np.arctan2(dy, dx)
-                
-                # Create curved twins
-                phase = 2 * np.pi * angle * curvature_radius / twin_spacing
-                phi[i, j] = np.tanh(np.sin(phase) * 3.0)
-        
-        return phi, eta1, eta2
-    
-    def create_bi_crystal_geometry(self, twin_spacing=20.0, num_grains=2):
-        """Create bi-crystal geometry with different orientations"""
-        eta1 = np.zeros((self.N, self.N))
-        eta2 = np.zeros((self.N, self.N))
-        phi = np.zeros((self.N, self.N))
-        
-        # Create alternating grains
-        grain_width = self.N // num_grains
-        
-        for g in range(num_grains):
-            start = g * grain_width
-            end = (g + 1) * grain_width if g < num_grains - 1 else self.N
-            
-            if g % 2 == 0:
-                # Twin grain
-                eta1[start:end, :] = 1.0
-                # Create periodic twins
-                for i in range(start, end):
-                    for j in range(self.N):
-                        phase = 2 * np.pi * self.Y[i, j] / twin_spacing
-                        phi[i, j] = np.tanh(np.sin(phase) * 3.0)
-            else:
-                # Twin-free grain
-                eta2[start:end, :] = 1.0
-        
-        # Smooth grain boundaries
-        gb_smooth = gaussian_filter(eta1, sigma=1.0)
-        eta1 = gb_smooth
-        eta2 = 1 - eta1
+        elif defect_type == 'void':
+            # Add void by removing material
+            center_x, center_y = defect_pos
+            for i in range(self.N):
+                for j in range(self.N):
+                    dist = np.sqrt((self.X[i, j] - center_x)**2 + (self.Y[i, j] - center_y)**2)
+                    if dist < defect_radius:
+                        eta1[i, j] = 0.0
+                        eta2[i, j] = 0.0
+                        phi[i, j] = 0.0
         
         return phi, eta1, eta2
 
-class SpectralSolver:
-    """Spectral solver for mechanical equilibrium with cubic anisotropy"""
+class EnhancedSpectralSolver:
+    """Enhanced spectral solver with error handling"""
     
-    def __init__(self, N, dx, C11, C12, C44):
+    def __init__(self, N, dx, elastic_params):
         self.N = N
         self.dx = dx
         
@@ -302,57 +301,81 @@ class SpectralSolver:
         self.ky = 2 * np.pi * fftfreq(N, d=dx).reshape(-1, 1)
         self.k2 = self.kx**2 + self.ky**2 + 1e-12
         
-        # Compute Green's function for 2D plane strain
+        # Extract elastic constants
+        C11 = elastic_params['C11']
+        C12 = elastic_params['C12']
+        C44 = elastic_params['C44']
+        
+        # 2D plane strain approximation for (111) plane
         C11_2d = (C11 + C12 + 2*C44) / 2
         C12_2d = (C11 + C12 - 2*C44) / 2
         lambda_2d = C12_2d
         mu_2d = (C11_2d - C12_2d) / 2
         
+        # Green's function components
         denom = mu_2d * (lambda_2d + 2*mu_2d) * self.k2
         self.G11 = (mu_2d*(self.kx**2 + 2*self.ky**2) + lambda_2d*self.ky**2) / denom
         self.G12 = -mu_2d * self.kx * self.ky / denom
         self.G22 = (mu_2d*(self.ky**2 + 2*self.kx**2) + lambda_2d*self.kx**2) / denom
+        
+        # Store stiffness for stress calculation
+        self.C11_2d = C11_2d
+        self.C12_2d = C12_2d
+        self.C44_2d = C44
     
     def solve(self, eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress=0):
-        """Solve mechanical equilibrium with FFT"""
-        # Fourier transforms
-        eps_xx_hat = fft2(eigenstrain_xx)
-        eps_yy_hat = fft2(eigenstrain_yy)
-        eps_xy_hat = fft2(eigenstrain_xy)
-        
-        # Solve for displacements
-        ux_hat = 1j * (self.G11 * self.kx * eps_xx_hat + 
-                      self.G12 * self.ky * eps_xx_hat +
-                      self.G12 * self.kx * eps_yy_hat + 
-                      self.G22 * self.ky * eps_yy_hat)
-        
-        uy_hat = 1j * (self.G12 * self.kx * eps_xx_hat + 
-                      self.G22 * self.ky * eps_xx_hat +
-                      self.G11 * self.kx * eps_yy_hat + 
-                      self.G12 * self.ky * eps_yy_hat)
-        
-        # Elastic strains
-        eps_xx_el = np.real(ifft2(1j * self.kx * ux_hat))
-        eps_yy_el = np.real(ifft2(1j * self.ky * uy_hat))
-        eps_xy_el = 0.5 * np.real(ifft2(1j * (self.kx * uy_hat + self.ky * ux_hat)))
-        
-        # Total strains
-        eps_xx = eps_xx_el + eigenstrain_xx
-        eps_yy = eps_yy_el + eigenstrain_yy
-        eps_xy = eps_xy_el + eigenstrain_xy
-        
-        # Stresses (plane strain approximation)
-        sxx = applied_stress + 168.4e9 * eps_xx + 121.4e9 * eps_yy
-        syy = 121.4e9 * eps_xx + 168.4e9 * eps_yy
-        sxy = 2 * 75.4e9 * eps_xy
-        
-        # von Mises equivalent stress
-        sigma_eq = np.sqrt(0.5 * ((sxx - syy)**2 + syy**2 + sxx**2 + 6 * sxy**2))
-        
-        return sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy
+        """Solve mechanical equilibrium with error handling"""
+        try:
+            # Check input shapes
+            assert eigenstrain_xx.shape == (self.N, self.N), "Invalid eigenstrain shape"
+            
+            # Fourier transforms
+            eps_xx_hat = fft2(eigenstrain_xx)
+            eps_yy_hat = fft2(eigenstrain_yy)
+            eps_xy_hat = fft2(eigenstrain_xy)
+            
+            # Solve for displacements
+            ux_hat = 1j * (self.G11 * self.kx * eps_xx_hat + 
+                          self.G12 * self.ky * eps_xx_hat +
+                          self.G12 * self.kx * eps_yy_hat + 
+                          self.G22 * self.ky * eps_yy_hat)
+            
+            uy_hat = 1j * (self.G12 * self.kx * eps_xx_hat + 
+                          self.G22 * self.ky * eps_xx_hat +
+                          self.G11 * self.kx * eps_yy_hat + 
+                          self.G12 * self.ky * eps_yy_hat)
+            
+            # Elastic strains
+            eps_xx_el = np.real(ifft2(1j * self.kx * ux_hat))
+            eps_yy_el = np.real(ifft2(1j * self.ky * uy_hat))
+            eps_xy_el = 0.5 * np.real(ifft2(1j * (self.kx * uy_hat + self.ky * ux_hat)))
+            
+            # Total strains
+            eps_xx = eps_xx_el + eigenstrain_xx
+            eps_yy = eps_yy_el + eigenstrain_yy
+            eps_xy = eps_xy_el + eigenstrain_xy
+            
+            # Stresses (plane strain approximation)
+            sxx = applied_stress + self.C11_2d * eps_xx + self.C12_2d * eps_yy
+            syy = self.C12_2d * eps_xx + self.C11_2d * eps_yy
+            sxy = 2 * self.C44_2d * eps_xy
+            
+            # von Mises equivalent stress
+            sigma_eq = np.sqrt(0.5 * ((sxx - syy)**2 + syy**2 + sxx**2 + 6 * sxy**2))
+            
+            # Clip unrealistic values
+            sigma_eq = np.clip(sigma_eq, 0, 5e9)
+            
+            return sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy
+            
+        except Exception as e:
+            st.error(f"Error in spectral solver: {str(e)}")
+            # Return zeros in case of error
+            zeros = np.zeros((self.N, self.N))
+            return zeros, zeros, zeros, zeros, zeros, zeros, zeros
 
 class NanotwinnedCuSolver:
-    """Main solver for nanotwinned copper microstructural evolution"""
+    """Main solver with comprehensive error handling"""
     
     def __init__(self, params):
         self.params = params
@@ -363,11 +386,25 @@ class NanotwinnedCuSolver:
         # Material properties
         self.mat_props = MaterialProperties.get_cu_properties()
         
+        # Validate parameters
+        errors, warnings = MaterialProperties.validate_parameters(params)
+        if errors:
+            raise ValueError(f"Parameter validation failed: {', '.join(errors)}")
+        if warnings:
+            st.warning(f"Parameter warnings: {', '.join(warnings)}")
+        
         # Initialize geometry visualizer
         self.geom_viz = InitialGeometryVisualizer(self.N, self.dx)
         
-        # Initialize fields
-        self.phi, self.eta1, self.eta2 = self.initialize_fields()
+        # Initialize fields with error handling
+        try:
+            self.phi, self.eta1, self.eta2 = self.initialize_fields()
+        except Exception as e:
+            st.error(f"Failed to initialize fields: {e}")
+            # Initialize with zeros as fallback
+            self.phi = np.zeros((self.N, self.N))
+            self.eta1 = np.zeros((self.N, self.N))
+            self.eta2 = np.zeros((self.N, self.N))
         
         # Initialize plastic strain
         self.eps_p_xx = np.zeros((self.N, self.N))
@@ -375,27 +412,32 @@ class NanotwinnedCuSolver:
         self.eps_p_xy = np.zeros((self.N, self.N))
         
         # Initialize spectral solver
-        elastic = self.mat_props['elastic']
-        self.spectral_solver = SpectralSolver(
-            self.N, self.dx,
-            elastic['C11'], elastic['C12'], elastic['C44']
+        self.spectral_solver = EnhancedSpectralSolver(
+            self.N, self.dx, self.mat_props['elastic']
         )
+        
+        # Initialize history for convergence monitoring
+        self.history = {
+            'phi_norm': [],
+            'energy': [],
+            'max_stress': [],
+            'plastic_work': []
+        }
     
     def initialize_fields(self):
         """Initialize order parameters based on selected geometry"""
         geom_type = self.params.get('geometry_type', 'standard')
-        twin_spacing = self.params.get('twin_spacing', 20.0)
-        gb_pos = self.params.get('grain_boundary_pos', 0.0)
+        twin_spacing = self.params['twin_spacing']
+        gb_pos = self.params['grain_boundary_pos']
         
-        if geom_type == 'multi_spacing':
-            return self.geom_viz.create_multi_twin_geometry(
-                [twin_spacing, twin_spacing*1.5, twin_spacing*2]
+        if geom_type == 'defect':
+            defect_type = self.params.get('defect_type', 'dislocation')
+            defect_pos = self.params.get('defect_pos', (0, 0))
+            defect_radius = self.params.get('defect_radius', 10.0)
+            return self.geom_viz.create_defect_geometry(
+                twin_spacing, defect_type, defect_pos, defect_radius
             )
-        elif geom_type == 'curved':
-            return self.geom_viz.create_curved_twin_geometry(twin_spacing)
-        elif geom_type == 'bi_crystal':
-            return self.geom_viz.create_bi_crystal_geometry(twin_spacing)
-        else:  # standard
+        else:
             return self.geom_viz.create_twin_grain_geometry(twin_spacing, gb_pos)
     
     def compute_local_energy_derivatives(self):
@@ -422,207 +464,497 @@ class NanotwinnedCuSolver:
     
     def compute_elastic_driving_force(self, sxx, syy, sxy):
         """Compute elastic driving force for twin evolution"""
-        # Get twin parameters
-        gamma_tw = self.mat_props['twinning']['gamma_tw']
-        n = self.mat_props['twinning']['n_2d']
-        a = self.mat_props['twinning']['a_2d']
-        
-        # Derivative of interpolation function
-        dh_dphi = 0.25 * (3*self.phi**2 - 2*self.phi - 1)
-        
-        # Transformation strain derivative
-        nx, ny = n[0], n[1]
-        ax, ay = a[0], a[1]
-        
-        deps_xx_dphi = gamma_tw * nx * ax * dh_dphi * self.eta1**2
-        deps_yy_dphi = gamma_tw * ny * ay * dh_dphi * self.eta1**2
-        deps_xy_dphi = 0.5 * gamma_tw * (nx * ay + ny * ax) * dh_dphi * self.eta1**2
-        
-        # Elastic driving force: -σ:∂ε*/∂φ
-        df_el_dphi = -(sxx * deps_xx_dphi + 
-                      syy * deps_yy_dphi + 
-                      2 * sxy * deps_xy_dphi)
-        
-        return df_el_dphi
+        try:
+            # Get twin parameters
+            gamma_tw = self.mat_props['twinning']['gamma_tw']
+            n = self.mat_props['twinning']['n_2d']
+            a = self.mat_props['twinning']['a_2d']
+            
+            # Derivative of interpolation function
+            dh_dphi = 0.25 * (3*self.phi**2 - 2*self.phi - 1)
+            
+            # Transformation strain derivative
+            nx, ny = n[0], n[1]
+            ax, ay = a[0], a[1]
+            
+            # Only compute where twin grain is active
+            active_mask = (self.eta1 > 0.5)
+            
+            deps_xx_dphi = np.zeros_like(self.phi)
+            deps_yy_dphi = np.zeros_like(self.phi)
+            deps_xy_dphi = np.zeros_like(self.phi)
+            
+            deps_xx_dphi[active_mask] = gamma_tw * nx * ax * dh_dphi[active_mask]
+            deps_yy_dphi[active_mask] = gamma_tw * ny * ay * dh_dphi[active_mask]
+            deps_xy_dphi[active_mask] = 0.5 * gamma_tw * (nx * ay + ny * ax) * dh_dphi[active_mask]
+            
+            # Elastic driving force: -σ:∂ε*/∂φ
+            df_el_dphi = -(sxx * deps_xx_dphi + 
+                          syy * deps_yy_dphi + 
+                          2 * sxy * deps_xy_dphi)
+            
+            return df_el_dphi
+            
+        except Exception as e:
+            st.error(f"Error computing elastic driving force: {e}")
+            return np.zeros_like(self.phi)
     
     def evolve_twin_field(self, sxx, syy, sxy, eps_p_mag):
-        """Evolve twin order parameter φ"""
-        # Extract parameters as floats
-        kappa0 = float(self.params['kappa0'])
-        gamma_aniso = float(self.params['gamma_aniso'])
-        L_CTB = float(self.params['L_CTB'])
-        L_ITB = float(self.params['L_ITB'])
-        n_mob = int(self.params['n_mob'])
-        zeta = float(self.params['zeta'])
-        
-        # Get twin parameters as floats
-        n_twin = self.mat_props['twinning']['n_2d']
-        nx = float(n_twin[0])
-        ny = float(n_twin[1])
-        
-        # Compute gradients
-        phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
-        
-        # Compute anisotropic properties
-        kappa_phi, L_phi = compute_anisotropic_properties_numba(
-            phi_gx, phi_gy, nx, ny, kappa0, gamma_aniso, L_CTB, L_ITB, n_mob
-        )
-        
-        # Compute driving forces
-        df_loc_dphi, _, _ = self.compute_local_energy_derivatives()
-        df_el_dphi = self.compute_elastic_driving_force(sxx, syy, sxy)
-        
-        # Compute dissipation term
-        diss_p = zeta * eps_p_mag * self.phi
-        
-        # Compute gradient term
-        lap_phi = compute_laplacian_numba(self.phi, self.dx)
-        
-        # Evolution equation
-        dphi_dt = -L_phi * (df_loc_dphi + df_el_dphi - kappa_phi * lap_phi + diss_p)
-        
-        # Update twin field
-        phi_new = self.phi + self.dt * dphi_dt
-        
-        # Apply periodic boundary conditions
-        phi_new = np.roll(phi_new, 1, axis=0)
-        phi_new = np.roll(phi_new, 1, axis=1)
-        
-        return np.clip(phi_new, -1.1, 1.1)
+        """Evolve twin order parameter φ with stability checks"""
+        try:
+            # Extract parameters as floats
+            kappa0 = float(self.params['kappa0'])
+            gamma_aniso = float(self.params['gamma_aniso'])
+            L_CTB = float(self.params['L_CTB'])
+            L_ITB = float(self.params['L_ITB'])
+            n_mob = int(self.params['n_mob'])
+            zeta = float(self.params['zeta'])
+            
+            # Get twin parameters as floats
+            n_twin = self.mat_props['twinning']['n_2d']
+            nx = float(n_twin[0])
+            ny = float(n_twin[1])
+            
+            # Compute gradients
+            phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
+            
+            # Compute anisotropic properties
+            kappa_phi, L_phi = compute_anisotropic_properties_numba(
+                phi_gx, phi_gy, nx, ny, kappa0, gamma_aniso, L_CTB, L_ITB, n_mob
+            )
+            
+            # Compute driving forces
+            df_loc_dphi, _, _ = self.compute_local_energy_derivatives()
+            df_el_dphi = self.compute_elastic_driving_force(sxx, syy, sxy)
+            
+            # Compute dissipation term
+            diss_p = zeta * eps_p_mag * self.phi
+            
+            # Compute gradient term
+            lap_phi = compute_laplacian_numba(self.phi, self.dx)
+            
+            # Evolution equation with stability factor
+            stability_factor = 0.5  # Controls numerical stability
+            dphi_dt = -L_phi * (df_loc_dphi + df_el_dphi - kappa_phi * lap_phi + diss_p)
+            
+            # Apply stability condition (CFL-like condition)
+            max_dphi_dt = np.max(np.abs(dphi_dt))
+            if max_dphi_dt * self.dt > stability_factor:
+                # Scale time step if needed
+                scale_factor = stability_factor / (max_dphi_dt * self.dt)
+                dphi_dt *= scale_factor
+            
+            # Update twin field
+            phi_new = self.phi + self.dt * dphi_dt
+            
+            # Apply periodic boundary conditions
+            phi_new = np.roll(phi_new, 1, axis=0)
+            phi_new = np.roll(phi_new, 1, axis=1)
+            
+            # Clip to physical bounds
+            phi_new = np.clip(phi_new, -1.1, 1.1)
+            
+            return phi_new
+            
+        except Exception as e:
+            st.error(f"Error evolving twin field: {e}")
+            return self.phi  # Return unchanged field on error
     
     def evolve_grain_fields(self):
-        """Evolve grain order parameters"""
-        kappa_eta = float(self.params['kappa_eta'])
-        L_eta = float(self.params['L_eta'])
-        
-        # Compute Laplacians
-        lap_eta1 = compute_laplacian_numba(self.eta1, self.dx)
-        lap_eta2 = compute_laplacian_numba(self.eta2, self.dx)
-        
-        # Compute local derivatives
-        _, df_deta1, df_deta2 = self.compute_local_energy_derivatives()
-        
-        # Evolution equations
-        deta1_dt = -L_eta * (df_deta1 - kappa_eta * lap_eta1)
-        deta2_dt = -L_eta * (df_deta2 - kappa_eta * lap_eta2)
-        
-        # Update grain fields
-        eta1_new = self.eta1 + self.dt * deta1_dt
-        eta2_new = self.eta2 + self.dt * deta2_dt
-        
-        # Enforce constraints
-        eta1_new = np.clip(eta1_new, 0, 1)
-        eta2_new = np.clip(eta2_new, 0, 1)
-        
-        # Enforce η₁² + η₂² ≤ 1
-        norm = np.sqrt(eta1_new**2 + eta2_new**2 + 1e-12)
-        mask = norm > 1
-        eta1_new[mask] = eta1_new[mask] / norm[mask]
-        eta2_new[mask] = eta2_new[mask] / norm[mask]
-        
-        return eta1_new, eta2_new
+        """Evolve grain order parameters with stability checks"""
+        try:
+            kappa_eta = float(self.params['kappa_eta'])
+            L_eta = float(self.params['L_eta'])
+            
+            # Compute Laplacians
+            lap_eta1 = compute_laplacian_numba(self.eta1, self.dx)
+            lap_eta2 = compute_laplacian_numba(self.eta2, self.dx)
+            
+            # Compute local derivatives
+            _, df_deta1, df_deta2 = self.compute_local_energy_derivatives()
+            
+            # Evolution equations with stability factor
+            stability_factor = 0.5
+            deta1_dt = -L_eta * (df_deta1 - kappa_eta * lap_eta1)
+            deta2_dt = -L_eta * (df_deta2 - kappa_eta * lap_eta2)
+            
+            # Check stability
+            max_change = max(np.max(np.abs(deta1_dt)), np.max(np.abs(deta2_dt)))
+            if max_change * self.dt > stability_factor:
+                scale = stability_factor / (max_change * self.dt)
+                deta1_dt *= scale
+                deta2_dt *= scale
+            
+            # Update grain fields
+            eta1_new = self.eta1 + self.dt * deta1_dt
+            eta2_new = self.eta2 + self.dt * deta2_dt
+            
+            # Enforce constraints
+            eta1_new = np.clip(eta1_new, 0, 1)
+            eta2_new = np.clip(eta2_new, 0, 1)
+            
+            # Enforce η₁² + η₂² ≤ 1
+            norm = np.sqrt(eta1_new**2 + eta2_new**2 + 1e-12)
+            mask = norm > 1
+            eta1_new[mask] = eta1_new[mask] / norm[mask]
+            eta2_new[mask] = eta2_new[mask] / norm[mask]
+            
+            return eta1_new, eta2_new
+            
+        except Exception as e:
+            st.error(f"Error evolving grain fields: {e}")
+            return self.eta1, self.eta2
     
-    def compute_plastic_strain(self, sigma_eq, sigma_y, eps_p_mag):
-        """Compute plastic strain evolution using Perzyna model"""
-        plastic_params = self.mat_props['plasticity']
-        gamma0_dot = plastic_params['gamma0_dot']
-        m = plastic_params['m']
-        
-        # Where yielding occurs
-        yield_mask = sigma_eq > sigma_y
-        
-        if np.any(yield_mask):
-            # Overstress ratio
-            overstress = (sigma_eq[yield_mask] - sigma_y[yield_mask]) / sigma_y[yield_mask]
+    def compute_plastic_strain(self, sigma_eq, sigma_y):
+        """Compute plastic strain evolution using Perzyna model - FIXED VERSION"""
+        try:
+            plastic_params = self.mat_props['plasticity']
+            gamma0_dot = plastic_params['gamma0_dot']
+            m = int(plastic_params['m'])
             
-            # Strain rate magnitude
-            gamma_dot = gamma0_dot * (overstress)**m
+            # Use Numba function to avoid indexing errors
+            eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = compute_plastic_strain_numba(
+                sigma_eq, sigma_y, 
+                self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
+                gamma0_dot, m, self.dt, self.N
+            )
             
-            # Plastic strain increment (simplified)
-            for i in range(self.N):
-                for j in range(self.N):
-                    if yield_mask[i, j]:
-                        stress_ratio = overstress[yield_mask[i, j]]
-                        gamma_dot_val = gamma0_dot * (stress_ratio)**m
-                        
-                        # Update plastic strains (simplified flow rule)
-                        self.eps_p_xx[i, j] += gamma_dot_val * self.dt
-                        self.eps_p_yy[i, j] += -0.5 * gamma_dot_val * self.dt  # Volume preserving
-                        self.eps_p_xy[i, j] += 0.0  # Simplified
-        
-        # Update plastic strain magnitude
-        eps_p_mag_new = np.sqrt(
-            2/3 * (self.eps_p_xx**2 + self.eps_p_yy**2 + 2*self.eps_p_xy**2)
-        )
-        
-        return eps_p_mag_new
+            # Update plastic strains
+            self.eps_p_xx = eps_p_xx_new
+            self.eps_p_yy = eps_p_yy_new
+            self.eps_p_xy = eps_p_xy_new
+            
+            # Compute plastic strain magnitude
+            eps_p_mag = np.sqrt(
+                2/3 * (self.eps_p_xx**2 + self.eps_p_yy**2 + 2*self.eps_p_xy**2)
+            )
+            
+            return eps_p_mag
+            
+        except Exception as e:
+            st.error(f"Error computing plastic strain: {e}")
+            # Return zero plastic strain on error
+            return np.zeros_like(sigma_eq)
+    
+    def compute_total_energy(self):
+        """Compute total free energy of the system"""
+        try:
+            # Local energy
+            W = self.params['W']
+            A = self.params['A']
+            B = self.params['B']
+            
+            f_loc = (W * (self.phi**2 - 1)**2 * self.eta1**2 +
+                    A * (self.eta1**2 * (1 - self.eta1)**2 + self.eta2**2 * (1 - self.eta2)**2) +
+                    B * self.eta1**2 * self.eta2**2)
+            
+            # Gradient energy
+            phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
+            grad_phi_sq = phi_gx**2 + phi_gy**2
+            
+            eta1_gx, eta1_gy = compute_gradients_numba(self.eta1, self.dx)
+            eta2_gx, eta2_gy = compute_gradients_numba(self.eta2, self.dx)
+            grad_eta1_sq = eta1_gx**2 + eta1_gy**2
+            grad_eta2_sq = eta2_gx**2 + eta2_gy**2
+            
+            kappa0 = self.params['kappa0']
+            kappa_eta = self.params['kappa_eta']
+            
+            f_grad = 0.5 * kappa0 * grad_phi_sq + 0.5 * kappa_eta * (grad_eta1_sq + grad_eta2_sq)
+            
+            # Total energy density
+            energy_density = f_loc + f_grad
+            
+            # Integrate over domain
+            total_energy = np.sum(energy_density) * (self.dx**2)
+            
+            return total_energy
+            
+        except Exception as e:
+            st.warning(f"Error computing energy: {e}")
+            return 0.0
     
     def step(self, applied_stress):
-        """Perform one time step of the simulation"""
-        # Get twin parameters
-        gamma_tw = self.mat_props['twinning']['gamma_tw']
-        n = self.mat_props['twinning']['n_2d']
-        a = self.mat_props['twinning']['a_2d']
-        
-        # Compute transformation strain
-        exx_star, eyy_star, exy_star = compute_transformation_strain_numba(
-            self.phi, self.eta1, gamma_tw, a[0], a[1], n[0], n[1]
-        )
-        
-        # Total eigenstrain (transformation + plastic)
-        eigenstrain_xx = exx_star + self.eps_p_xx
-        eigenstrain_yy = eyy_star + self.eps_p_yy
-        eigenstrain_xy = exy_star + self.eps_p_xy
-        
-        # Solve mechanical equilibrium
-        sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy = self.spectral_solver.solve(
-            eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress
-        )
-        
-        # Compute twin spacing
-        phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
-        h = compute_twin_spacing_numba(phi_gx, phi_gy)
-        
-        # Compute yield stress using Ovid'ko model
-        plastic_params = self.mat_props['plasticity']
-        sigma_y = compute_yield_stress_numba(
-            h, plastic_params['sigma0'], plastic_params['mu'], 
-            plastic_params['b'], plastic_params['nu']
-        )
-        
-        # Compute plastic strain magnitude
-        eps_p_mag = np.sqrt(
-            2/3 * (self.eps_p_xx**2 + self.eps_p_yy**2 + 2*self.eps_p_xy**2)
-        )
-        
-        # Update plastic strain
-        eps_p_mag = self.compute_plastic_strain(sigma_eq, sigma_y, eps_p_mag)
-        
-        # Evolve phase fields
-        self.phi = self.evolve_twin_field(sxx, syy, sxy, eps_p_mag)
-        self.eta1, self.eta2 = self.evolve_grain_fields()
-        
-        # Prepare results
-        results = {
-            'phi': self.phi.copy(),
-            'eta1': self.eta1.copy(),
-            'eta2': self.eta2.copy(),
-            'sigma_eq': sigma_eq.copy(),
-            'sigma_xx': sxx.copy(),
-            'sigma_yy': syy.copy(),
-            'sigma_xy': sxy.copy(),
-            'h': h.copy(),
-            'sigma_y': sigma_y.copy(),
-            'eps_p_mag': eps_p_mag.copy(),
-            'eps_xx': eps_xx.copy(),
-            'eps_yy': eps_yy.copy(),
-            'eps_xy': eps_xy.copy()
-        }
-        
-        return results
+        """Perform one time step of the simulation with comprehensive error handling"""
+        try:
+            # Get twin parameters
+            gamma_tw = self.mat_props['twinning']['gamma_tw']
+            n = self.mat_props['twinning']['n_2d']
+            a = self.mat_props['twinning']['a_2d']
+            
+            # Compute transformation strain
+            exx_star, eyy_star, exy_star = compute_transformation_strain_numba(
+                self.phi, self.eta1, gamma_tw, a[0], a[1], n[0], n[1]
+            )
+            
+            # Total eigenstrain (transformation + plastic)
+            eigenstrain_xx = exx_star + self.eps_p_xx
+            eigenstrain_yy = eyy_star + self.eps_p_yy
+            eigenstrain_xy = exy_star + self.eps_p_xy
+            
+            # Solve mechanical equilibrium
+            sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy = self.spectral_solver.solve(
+                eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress
+            )
+            
+            # Compute twin spacing
+            phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
+            h = compute_twin_spacing_numba(phi_gx, phi_gy)
+            
+            # Compute yield stress using Ovid'ko model
+            plastic_params = self.mat_props['plasticity']
+            sigma_y = compute_yield_stress_numba(
+                h, plastic_params['sigma0'], plastic_params['mu'], 
+                plastic_params['b'], plastic_params['nu']
+            )
+            
+            # Update plastic strain
+            eps_p_mag = self.compute_plastic_strain(sigma_eq, sigma_y)
+            
+            # Evolve phase fields
+            self.phi = self.evolve_twin_field(sxx, syy, sxy, eps_p_mag)
+            self.eta1, self.eta2 = self.evolve_grain_fields()
+            
+            # Update history for monitoring
+            phi_norm = np.linalg.norm(self.phi)
+            total_energy = self.compute_total_energy()
+            max_stress = np.max(sigma_eq)
+            plastic_work = np.sum(eps_p_mag) * (self.dx**2)
+            
+            self.history['phi_norm'].append(phi_norm)
+            self.history['energy'].append(total_energy)
+            self.history['max_stress'].append(max_stress)
+            self.history['plastic_work'].append(plastic_work)
+            
+            # Prepare results
+            results = {
+                'phi': self.phi.copy(),
+                'eta1': self.eta1.copy(),
+                'eta2': self.eta2.copy(),
+                'sigma_eq': sigma_eq.copy(),
+                'sigma_xx': sxx.copy(),
+                'sigma_yy': syy.copy(),
+                'sigma_xy': sxy.copy(),
+                'h': h.copy(),
+                'sigma_y': sigma_y.copy(),
+                'eps_p_mag': eps_p_mag.copy(),
+                'eps_xx': eps_xx.copy(),
+                'eps_yy': eps_yy.copy(),
+                'eps_xy': eps_xy.copy(),
+                'convergence': {
+                    'phi_norm': phi_norm,
+                    'energy': total_energy,
+                    'max_stress': max_stress,
+                    'plastic_work': plastic_work
+                }
+            }
+            
+            return results
+            
+        except Exception as e:
+            st.error(f"Error in simulation step: {e}")
+            # Return zeros in case of error
+            zeros = np.zeros((self.N, self.N))
+            return {
+                'phi': zeros,
+                'eta1': zeros,
+                'eta2': zeros,
+                'sigma_eq': zeros,
+                'sigma_xx': zeros,
+                'sigma_yy': zeros,
+                'sigma_xy': zeros,
+                'h': zeros,
+                'sigma_y': zeros,
+                'eps_p_mag': zeros,
+                'eps_xx': zeros,
+                'eps_yy': zeros,
+                'eps_xy': zeros,
+                'convergence': {
+                    'phi_norm': 0,
+                    'energy': 0,
+                    'max_stress': 0,
+                    'plastic_work': 0
+                }
+            }
 
 # ============================================================================
-# STREAMLIT APPLICATION
+# COMPREHENSIVE VISUALIZATION AND MONITORING
+# ============================================================================
+class SimulationMonitor:
+    """Monitor simulation progress and convergence"""
+    
+    @staticmethod
+    def create_convergence_plots(history, timesteps):
+        """Create convergence monitoring plots"""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # Phi norm evolution
+        axes[0, 0].plot(timesteps, history['phi_norm'], 'b-', linewidth=2)
+        axes[0, 0].set_xlabel('Time (ns)')
+        axes[0, 0].set_ylabel('||φ||')
+        axes[0, 0].set_title('Twin Order Parameter Norm')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Energy evolution
+        axes[0, 1].plot(timesteps, history['energy'], 'r-', linewidth=2)
+        axes[0, 1].set_xlabel('Time (ns)')
+        axes[0, 1].set_ylabel('Total Energy (J)')
+        axes[0, 1].set_title('System Energy Evolution')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Maximum stress evolution
+        axes[1, 0].plot(timesteps, np.array(history['max_stress'])/1e9, 'g-', linewidth=2)
+        axes[1, 0].set_xlabel('Time (ns)')
+        axes[1, 0].set_ylabel('Max Stress (GPa)')
+        axes[1, 0].set_title('Maximum Stress Evolution')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Plastic work evolution
+        axes[1, 1].plot(timesteps, history['plastic_work'], 'm-', linewidth=2)
+        axes[1, 1].set_xlabel('Time (ns)')
+        axes[1, 1].set_ylabel('Plastic Work (J)')
+        axes[1, 1].set_title('Plastic Work Evolution')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        return fig
+    
+    @staticmethod
+    def create_field_comparison_plot(initial, final, N, dx):
+        """Create comparison plot of initial and final states"""
+        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+        
+        # Initial state
+        axes[0, 0].imshow(initial['phi'], cmap='RdBu_r', vmin=-1.2, vmax=1.2)
+        axes[0, 0].set_title('Initial φ')
+        axes[0, 1].imshow(initial['sigma_eq']/1e9, cmap='hot', vmin=0, vmax=2)
+        axes[0, 1].set_title('Initial σ_eq (GPa)')
+        axes[0, 2].imshow(initial['h'], cmap='plasma', vmin=0, vmax=30)
+        axes[0, 2].set_title('Initial Twin Spacing (nm)')
+        
+        # Final state
+        axes[1, 0].imshow(final['phi'], cmap='RdBu_r', vmin=-1.2, vmax=1.2)
+        axes[1, 0].set_title('Final φ')
+        axes[1, 1].imshow(final['sigma_eq']/1e9, cmap='hot', vmin=0, vmax=2)
+        axes[1, 1].set_title('Final σ_eq (GPa)')
+        axes[1, 2].imshow(final['h'], cmap='plasma', vmin=0, vmax=30)
+        axes[1, 2].set_title('Final Twin Spacing (nm)')
+        
+        # Differences
+        phi_diff = final['phi'] - initial['phi']
+        stress_diff = final['sigma_eq'] - initial['sigma_eq']
+        spacing_diff = final['h'] - initial['h']
+        
+        axes[2, 0].imshow(phi_diff, cmap='RdBu_r', vmin=-0.5, vmax=0.5)
+        axes[2, 0].set_title('Δφ')
+        axes[2, 1].imshow(stress_diff/1e9, cmap='coolwarm', vmin=-1, vmax=1)
+        axes[2, 1].set_title('Δσ_eq (GPa)')
+        axes[2, 2].imshow(spacing_diff, cmap='coolwarm', vmin=-10, vmax=10)
+        axes[2, 2].set_title('ΔTwin Spacing (nm)')
+        
+        for ax in axes.flat:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        
+        plt.tight_layout()
+        return fig
+
+# ============================================================================
+# ENHANCED EXPORT FUNCTIONALITY
+# ============================================================================
+class DataExporter:
+    """Handle data export in multiple formats"""
+    
+    @staticmethod
+    def export_simulation_results(results_history, params, geometry, filename_prefix):
+        """Export comprehensive simulation results"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # 1. Save parameters as JSON
+            params_json = json.dumps(params, indent=2, cls=NumpyEncoder)
+            zip_file.writestr(f"{filename_prefix}_params_{timestamp}.json", params_json)
+            
+            # 2. Save initial and final states
+            if results_history:
+                initial = results_history[0]
+                final = results_history[-1]
+                
+                # Save as NPZ
+                npz_buffer = BytesIO()
+                np.savez_compressed(npz_buffer,
+                                  phi_initial=initial['phi'],
+                                  eta1_initial=initial['eta1'],
+                                  eta2_initial=initial['eta2'],
+                                  phi_final=final['phi'],
+                                  eta1_final=final['eta1'],
+                                  eta2_final=final['eta2'],
+                                  sigma_eq_final=final['sigma_eq'],
+                                  h_final=final['h'],
+                                  sigma_y_final=final['sigma_y'])
+                zip_file.writestr(f"{filename_prefix}_states_{timestamp}.npz", npz_buffer.getvalue())
+            
+            # 3. Save convergence history
+            if hasattr(geometry, 'history') and geometry.history:
+                history_data = {
+                    'timesteps': np.arange(len(geometry.history['phi_norm'])) * params['dt'],
+                    'phi_norm': geometry.history['phi_norm'],
+                    'energy': geometry.history['energy'],
+                    'max_stress': geometry.history['max_stress'],
+                    'plastic_work': geometry.history['plastic_work']
+                }
+                
+                npz_buffer = BytesIO()
+                np.savez_compressed(npz_buffer, **history_data)
+                zip_file.writestr(f"{filename_prefix}_history_{timestamp}.npz", npz_buffer.getvalue())
+            
+            # 4. Save as CSV for easy analysis
+            if results_history:
+                csv_data = []
+                for i, results in enumerate(results_history):
+                    csv_data.append({
+                        'step': i,
+                        'avg_phi': np.mean(results['phi']),
+                        'avg_sigma_eq_gpa': np.mean(results['sigma_eq']) / 1e9,
+                        'avg_h_nm': np.mean(results['h']),
+                        'avg_sigma_y_mpa': np.mean(results['sigma_y']) / 1e6,
+                        'max_eps_p': np.max(results['eps_p_mag'])
+                    })
+                
+                df = pd.DataFrame(csv_data)
+                csv_buffer = StringIO()
+                df.to_csv(csv_buffer, index=False)
+                zip_file.writestr(f"{filename_prefix}_summary_{timestamp}.csv", csv_buffer.getvalue())
+            
+            # 5. Save as PyTorch tensors
+            if results_history:
+                torch_data = {
+                    'phi': torch.stack([torch.from_numpy(r['phi']) for r in results_history]),
+                    'sigma_eq': torch.stack([torch.from_numpy(r['sigma_eq']) for r in results_history]),
+                    'h': torch.stack([torch.from_numpy(r['h']) for r in results_history])
+                }
+                
+                torch_buffer = BytesIO()
+                torch.save(torch_data, torch_buffer)
+                zip_file.writestr(f"{filename_prefix}_tensors_{timestamp}.pt", torch_buffer.getvalue())
+        
+        zip_buffer.seek(0)
+        return zip_buffer
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for numpy types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+# ============================================================================
+# STREAMLIT APPLICATION WITH ERROR HANDLING
 # ============================================================================
 def main():
     st.set_page_config(
@@ -631,7 +963,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS
+    # Custom CSS for better UI
     st.markdown("""
     <style>
     .main-header {
@@ -639,12 +971,9 @@ def main():
         color: #1E3A8A;
         text-align: center;
         margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.8rem;
-        color: #3B82F6;
-        margin-top: 1.5rem;
-        margin-bottom: 1rem;
+        background: linear-gradient(90deg, #1E3A8A, #3B82F6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
     }
     .info-box {
         background-color: #F0F9FF;
@@ -652,28 +981,59 @@ def main():
         border-radius: 10px;
         border-left: 5px solid #3B82F6;
         margin: 1rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .metric-box {
-        background-color: #F3F4F6;
+    .warning-box {
+        background-color: #FEF3C7;
         padding: 1rem;
         border-radius: 8px;
+        border-left: 5px solid #F59E0B;
+        margin: 0.5rem 0;
+    }
+    .error-box {
+        background-color: #FEE2E2;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 5px solid #DC2626;
+        margin: 0.5rem 0;
+    }
+    .success-box {
+        background-color: #D1FAE5;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 5px solid #10B981;
+        margin: 0.5rem 0;
+    }
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
         margin: 0.5rem;
+    }
+    .tab-content {
+        padding: 1rem;
+        border-radius: 10px;
+        background: white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     </style>
     """, unsafe_allow_html=True)
     
     # Header
     st.markdown('<h1 class="main-header">🔬 Nanotwinned Copper Phase-Field Simulator</h1>', unsafe_allow_html=True)
+    
     st.markdown("""
     <div class="info-box">
-    <strong>Complete Theoretical Implementation:</strong><br>
-    • Cubic anisotropic elasticity with full stiffness tensor<br>
+    <strong>Advanced Physics Implementation:</strong><br>
+    • Cubic anisotropic elasticity with spectral FFT solver<br>
     • {111}<112> transformation strain for FCC twinning<br>
     • Ovid'ko confined layer slip strengthening model<br>
-    • Perzyna viscoplasticity with strain hardening<br>
+    • Perzyna viscoplasticity with numerical stability<br>
     • Grain-twin coupling with anti-overlap constraint<br>
-    • Inclination-dependent CTB/ITB kinetics
+    • Inclination-dependent CTB/ITB kinetics<br>
+    • Comprehensive error handling and monitoring
     </div>
     """, unsafe_allow_html=True)
     
@@ -681,68 +1041,93 @@ def main():
     with st.sidebar:
         st.header("⚙️ Simulation Configuration")
         
-        # Geometry type selection
-        st.subheader("📐 Initial Geometry")
+        # Geometry configuration
+        st.subheader("📐 Geometry Configuration")
         geometry_type = st.selectbox(
             "Geometry Type",
-            ["Standard Twin Grain", "Multiple Twin Spacings", "Curved Twins", "Bi-Crystal"],
+            ["Standard Twin Grain", "Twin Grain with Defect"],
             key="geom_type"
         )
         
-        # Map geometry type to parameter
-        geom_map = {
-            "Standard Twin Grain": "standard",
-            "Multiple Twin Spacings": "multi_spacing",
-            "Curved Twins": "curved",
-            "Bi-Crystal": "bi_crystal"
-        }
-        
-        # Simulation parameters
+        # Simulation parameters with validation
         st.subheader("📊 Grid Configuration")
-        N = st.slider("Grid resolution (N×N)", 64, 512, 256, 64, key="N")
-        dx = st.slider("Grid spacing (nm)", 0.2, 2.0, 0.5, 0.1, key="dx")
-        dt = st.slider("Time step (ns)", 1e-5, 1e-3, 1e-4, 1e-5, key="dt")
+        N = st.slider("Grid resolution (N×N)", 64, 512, 256, 64, key="N",
+                     help="Higher resolution = more accurate but slower")
+        dx = st.slider("Grid spacing (nm)", 0.2, 2.0, 0.5, 0.1, key="dx",
+                      help="Smaller spacing = finer details")
+        dt = st.slider("Time step (ns)", 1e-5, 1e-3, 1e-4, 1e-5, key="dt",
+                      help="Smaller time step = more stable but slower")
         
+        # Material parameters
         st.subheader("🔬 Material Parameters")
-        twin_spacing = st.slider("Twin spacing λ (nm)", 5.0, 100.0, 20.0, 1.0, key="twin_spacing")
-        grain_boundary_pos = st.slider("Grain boundary position (nm)", -50.0, 50.0, 0.0, 1.0, key="gb_pos")
+        twin_spacing = st.slider("Twin spacing λ (nm)", 5.0, 100.0, 20.0, 1.0, key="twin_spacing",
+                                help="Initial distance between twin boundaries")
+        grain_boundary_pos = st.slider("Grain boundary position (nm)", -50.0, 50.0, 0.0, 1.0, key="gb_pos",
+                                      help="Location of grain boundary")
         
+        # Defect parameters (if selected)
+        if geometry_type == "Twin Grain with Defect":
+            st.subheader("⚡ Defect Parameters")
+            defect_type = st.selectbox("Defect Type", ["Dislocation", "Void"], key="defect_type")
+            defect_x = st.slider("Defect X position (nm)", -50.0, 50.0, 0.0, 1.0, key="defect_x")
+            defect_y = st.slider("Defect Y position (nm)", -50.0, 50.0, 0.0, 1.0, key="defect_y")
+            defect_radius = st.slider("Defect radius (nm)", 5.0, 30.0, 10.0, 1.0, key="defect_radius")
+        
+        # Thermodynamic parameters
         st.subheader("⚛️ Thermodynamic Parameters")
-        W = st.slider("Twin well depth W (J/m³)", 0.1, 10.0, 2.0, 0.1, key="W")
-        A = st.slider("Grain double-well A (J/m³)", 0.1, 20.0, 5.0, 0.5, key="A")
-        B = st.slider("Grain anti-overlap B (J/m³)", 0.1, 30.0, 10.0, 0.5, key="B")
+        W = st.slider("Twin well depth W (J/m³)", 0.1, 10.0, 2.0, 0.1, key="W",
+                     help="Controls twin boundary energy")
+        A = st.slider("Grain double-well A (J/m³)", 0.1, 20.0, 5.0, 0.5, key="A",
+                     help="Controls grain boundary energy")
+        B = st.slider("Grain anti-overlap B (J/m³)", 0.1, 30.0, 10.0, 0.5, key="B",
+                     help="Prevents grain overlap")
         
+        # Gradient energy parameters
         st.subheader("📈 Gradient Energy")
-        kappa0 = st.slider("κ₀ (Gradient energy ref)", 0.01, 10.0, 1.0, 0.1, key="kappa0")
-        gamma_aniso = st.slider("γ_aniso (CTB/ITB ratio)", 0.0, 2.0, 0.7, 0.05, key="gamma_aniso")
-        kappa_eta = st.slider("κ_η (GB energy)", 0.1, 10.0, 2.0, 0.1, key="kappa_eta")
+        kappa0 = st.slider("κ₀ (Gradient energy ref)", 0.01, 10.0, 1.0, 0.1, key="kappa0",
+                          help="Baseline gradient energy coefficient")
+        gamma_aniso = st.slider("γ_aniso (CTB/ITB ratio)", 0.0, 2.0, 0.7, 0.05, key="gamma_aniso",
+                               help="Controls anisotropy between CTBs and ITBs")
+        kappa_eta = st.slider("κ_η (GB energy)", 0.1, 10.0, 2.0, 0.1, key="kappa_eta",
+                             help="Grain boundary gradient energy")
         
+        # Kinetic parameters
         st.subheader("⚡ Kinetic Parameters")
-        L_CTB = st.slider("L_CTB (CTB mobility)", 0.001, 1.0, 0.05, 0.001, key="L_CTB")
-        L_ITB = st.slider("L_ITB (ITB mobility)", 0.1, 20.0, 5.0, 0.1, key="L_ITB")
-        n_mob = st.slider("n (Mobility exponent)", 1, 10, 4, 1, key="n_mob")
-        L_eta = st.slider("L_η (GB mobility)", 0.1, 10.0, 1.0, 0.1, key="L_eta")
-        zeta = st.slider("ζ (Dislocation pinning)", 0.0, 2.0, 0.3, 0.05, key="zeta")
+        L_CTB = st.slider("L_CTB (CTB mobility)", 0.001, 1.0, 0.05, 0.001, key="L_CTB",
+                         help="Mobility of coherent twin boundaries")
+        L_ITB = st.slider("L_ITB (ITB mobility)", 0.1, 20.0, 5.0, 0.1, key="L_ITB",
+                         help="Mobility of incoherent twin boundaries")
+        n_mob = st.slider("n (Mobility exponent)", 1, 10, 4, 1, key="n_mob",
+                         help="Controls transition sharpness between CTB and ITB")
+        L_eta = st.slider("L_η (GB mobility)", 0.1, 10.0, 1.0, 0.1, key="L_eta",
+                         help="Grain boundary mobility")
+        zeta = st.slider("ζ (Dislocation pinning)", 0.0, 2.0, 0.3, 0.05, key="zeta",
+                        help="Strength of dislocation pinning")
         
+        # Loading conditions
         st.subheader("🏗️ Loading Conditions")
-        applied_stress_MPa = st.slider("Applied stress σ_xx (MPa)", 0.0, 1000.0, 300.0, 10.0, key="applied_stress")
+        applied_stress_MPa = st.slider("Applied stress σ_xx (MPa)", 0.0, 1000.0, 300.0, 10.0, key="applied_stress",
+                                      help="External applied stress")
         
+        # Simulation control
         st.subheader("⏱️ Simulation Control")
-        n_steps = st.slider("Number of steps", 10, 1000, 100, 10, key="n_steps")
-        save_frequency = st.slider("Save frequency", 1, 100, 10, 1, key="save_freq")
+        n_steps = st.slider("Number of steps", 10, 1000, 100, 10, key="n_steps",
+                           help="Total simulation steps")
+        save_frequency = st.slider("Save frequency", 1, 100, 10, 1, key="save_freq",
+                                  help="How often to save results")
         
-        # Initialize button
-        if st.button("🔄 Initialize Geometry", type="primary", use_container_width=True):
-            st.session_state.geometry_initialized = True
-    
-    # Main content
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        st.markdown("### 📋 Quick Stats")
+        # Advanced options
+        with st.expander("🔧 Advanced Options"):
+            stability_factor = st.slider("Stability factor", 0.1, 1.0, 0.5, 0.1,
+                                        help="Controls numerical stability")
+            enable_monitoring = st.checkbox("Enable real-time monitoring", True,
+                                           help="Track convergence during simulation")
+            auto_adjust_dt = st.checkbox("Auto-adjust time step", True,
+                                        help="Automatically adjust time step for stability")
         
-        if 'geometry_initialized' in st.session_state and st.session_state.geometry_initialized:
-            # Create parameters dictionary
+        # Initialize button with validation
+        if st.button("🔄 Initialize Simulation", type="primary", use_container_width=True):
+            # Validate parameters
             params = {
                 'N': N,
                 'dx': dx,
@@ -760,333 +1145,336 @@ def main():
                 'zeta': zeta,
                 'twin_spacing': twin_spacing,
                 'grain_boundary_pos': grain_boundary_pos,
-                'geometry_type': geom_map[geometry_type],
+                'geometry_type': 'defect' if geometry_type == "Twin Grain with Defect" else 'standard',
                 'applied_stress': applied_stress_MPa * 1e6,
-                'save_frequency': save_frequency
+                'save_frequency': save_frequency,
+                'stability_factor': stability_factor
             }
             
-            # Create geometry visualizer
-            geom_viz = InitialGeometryVisualizer(N, dx)
+            # Add defect parameters if needed
+            if geometry_type == "Twin Grain with Defect":
+                params['defect_type'] = defect_type.lower()
+                params['defect_pos'] = (defect_x, defect_y)
+                params['defect_radius'] = defect_radius
             
-            # Create initial geometry
-            if geometry_type == "Multiple Twin Spacings":
-                phi, eta1, eta2 = geom_viz.create_multi_twin_geometry(
-                    [twin_spacing, twin_spacing*1.5, twin_spacing*2]
-                )
-            elif geometry_type == "Curved Twins":
-                phi, eta1, eta2 = geom_viz.create_curved_twin_geometry(twin_spacing)
-            elif geometry_type == "Bi-Crystal":
-                phi, eta1, eta2 = geom_viz.create_bi_crystal_geometry(twin_spacing)
+            # Validate parameters
+            errors, warnings = MaterialProperties.validate_parameters(params)
+            
+            if errors:
+                st.error(f"Validation errors: {', '.join(errors)}")
+                st.session_state.validation_failed = True
             else:
-                phi, eta1, eta2 = geom_viz.create_twin_grain_geometry(twin_spacing, grain_boundary_pos)
-            
-            # Store in session state
-            st.session_state.initial_geometry = {
-                'phi': phi,
-                'eta1': eta1,
-                'eta2': eta2,
-                'geom_viz': geom_viz,
-                'params': params
-            }
-            
-            # Display geometry metrics
-            phi_gx, phi_gy = compute_gradients_numba(phi, dx)
-            h = compute_twin_spacing_numba(phi_gx, phi_gy)
-            
-            st.metric("Grid Size", f"{N}×{N}")
-            st.metric("Avg. Twin Spacing", f"{np.mean(h[(h>5) & (h<50)]):.1f} nm")
-            st.metric("Twin Grain Area", f"{np.sum(eta1>0.5) * dx**2:.0f} nm²")
-            st.metric("Grain Boundary Length", f"{np.sum(np.abs(eta1-eta2)<0.2) * dx:.0f} nm")
-            
-            st.success("✅ Geometry initialized!")
+                if warnings:
+                    st.warning(f"Parameter warnings: {', '.join(warnings)}")
+                
+                # Initialize geometry visualizer
+                geom_viz = InitialGeometryVisualizer(N, dx)
+                
+                # Create initial geometry
+                if geometry_type == "Twin Grain with Defect":
+                    phi, eta1, eta2 = geom_viz.create_defect_geometry(
+                        twin_spacing, defect_type.lower(), (defect_x, defect_y), defect_radius
+                    )
+                else:
+                    phi, eta1, eta2 = geom_viz.create_twin_grain_geometry(twin_spacing, grain_boundary_pos)
+                
+                # Store in session state
+                st.session_state.initial_geometry = {
+                    'phi': phi,
+                    'eta1': eta1,
+                    'eta2': eta2,
+                    'geom_viz': geom_viz,
+                    'params': params
+                }
+                
+                st.session_state.initialized = True
+                st.success("✅ Simulation initialized successfully!")
     
-    with col1:
-        st.markdown("### 🎨 Initial Geometry Visualization")
+    # Main content area
+    if 'initialized' in st.session_state and st.session_state.initialized:
+        # Get initial geometry
+        phi = st.session_state.initial_geometry['phi']
+        eta1 = st.session_state.initial_geometry['eta1']
+        eta2 = st.session_state.initial_geometry['eta2']
+        geom_viz = st.session_state.initial_geometry['geom_viz']
+        params = st.session_state.initial_geometry['params']
         
-        if 'initial_geometry' in st.session_state:
-            phi = st.session_state.initial_geometry['phi']
-            eta1 = st.session_state.initial_geometry['eta1']
-            eta2 = st.session_state.initial_geometry['eta2']
-            geom_viz = st.session_state.initial_geometry['geom_viz']
-            params = st.session_state.initial_geometry['params']
+        # Create tabs for different sections
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Initial Geometry", "🚀 Run Simulation", "📈 Results", "💾 Export"])
+        
+        with tab1:
+            st.header("Initial Geometry Visualization")
             
-            # Create tabs for different visualizations
-            tab1, tab2, tab3 = st.tabs(["2D Visualization", "3D Visualization", "Analysis"])
+            col1, col2 = st.columns([2, 1])
             
-            with tab1:
+            with col1:
                 # 2D visualization
-                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+                fig, ax = plt.subplots(1, 3, figsize=(15, 5))
                 
                 # Twin order parameter
-                im1 = axes[0, 0].imshow(phi, extent=[geom_viz.x[0], geom_viz.x[-1], geom_viz.y[0], geom_viz.y[-1]], 
-                                       cmap='RdBu_r', vmin=-1.2, vmax=1.2)
-                axes[0, 0].set_title('Twin Order Parameter φ', fontsize=12)
-                axes[0, 0].set_xlabel('x (nm)')
-                axes[0, 0].set_ylabel('y (nm)')
-                plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04)
+                im1 = ax[0].imshow(phi, cmap='RdBu_r', vmin=-1.2, vmax=1.2)
+                ax[0].set_title('Twin Order Parameter φ')
+                ax[0].set_xlabel('x (nm)')
+                ax[0].set_ylabel('y (nm)')
+                plt.colorbar(im1, ax=ax[0], fraction=0.046, pad=0.04)
                 
                 # Grain structure
                 grains_rgb = np.zeros((N, N, 3))
-                grains_rgb[..., 0] = eta1
-                grains_rgb[..., 2] = eta2
-                axes[0, 1].imshow(grains_rgb, extent=[geom_viz.x[0], geom_viz.x[-1], geom_viz.y[0], geom_viz.y[-1]])
-                axes[0, 1].set_title('Grain Structure', fontsize=12)
-                axes[0, 1].set_xlabel('x (nm)')
-                axes[0, 1].set_ylabel('y (nm)')
-                
-                # Twin boundaries
-                phi_gx, phi_gy = compute_gradients_numba(phi, dx)
-                grad_mag = np.sqrt(phi_gx**2 + phi_gy**2)
-                twin_boundaries = grad_mag > np.percentile(grad_mag, 95)
-                axes[0, 2].imshow(twin_boundaries, extent=[geom_viz.x[0], geom_viz.x[-1], geom_viz.y[0], geom_viz.y[-1]], 
-                                 cmap='gray')
-                axes[0, 2].set_title('Twin Boundaries', fontsize=12)
-                axes[0, 2].set_xlabel('x (nm)')
-                axes[0, 2].set_ylabel('y (nm)')
+                grains_rgb[..., 0] = eta1  # Red for twin grain
+                grains_rgb[..., 2] = eta2  # Blue for twin-free grain
+                ax[1].imshow(grains_rgb)
+                ax[1].set_title('Grain Structure')
+                ax[1].set_xlabel('x (nm)')
+                ax[1].set_ylabel('y (nm)')
                 
                 # Twin spacing
+                phi_gx, phi_gy = compute_gradients_numba(phi, dx)
                 h = compute_twin_spacing_numba(phi_gx, phi_gy)
-                im4 = axes[1, 0].imshow(np.clip(h, 0, 50), 
-                                       extent=[geom_viz.x[0], geom_viz.x[-1], geom_viz.y[0], geom_viz.y[-1]], 
-                                       cmap='plasma', vmin=0, vmax=30)
-                axes[1, 0].set_title('Twin Spacing (nm)', fontsize=12)
-                axes[1, 0].set_xlabel('x (nm)')
-                axes[1, 0].set_ylabel('y (nm)')
-                plt.colorbar(im4, ax=axes[1, 0], fraction=0.046, pad=0.04)
-                
-                # Grain boundary profile
-                x_profile = geom_viz.X[N//2, :]
-                eta1_profile = eta1[N//2, :]
-                axes[1, 1].plot(x_profile, eta1_profile, 'r-', linewidth=2)
-                axes[1, 1].axvline(x=grain_boundary_pos, color='gray', linestyle='--', alpha=0.5)
-                axes[1, 1].set_xlabel('x (nm)')
-                axes[1, 1].set_ylabel('η₁')
-                axes[1, 1].set_title('Grain Boundary Profile', fontsize=12)
-                axes[1, 1].grid(True, alpha=0.3)
-                
-                # Twin profile
-                y_profile = geom_viz.Y[:, N//2]
-                phi_profile = phi[:, N//2]
-                axes[1, 2].plot(y_profile, phi_profile, 'b-', linewidth=2)
-                axes[1, 2].set_xlabel('y (nm)')
-                axes[1, 2].set_ylabel('φ')
-                axes[1, 2].set_title('Twin Profile', fontsize=12)
-                axes[1, 2].grid(True, alpha=0.3)
+                im3 = ax[2].imshow(np.clip(h, 0, 50), cmap='plasma', vmin=0, vmax=30)
+                ax[2].set_title('Twin Spacing (nm)')
+                ax[2].set_xlabel('x (nm)')
+                ax[2].set_ylabel('y (nm)')
+                plt.colorbar(im3, ax=ax[2], fraction=0.046, pad=0.04)
                 
                 plt.tight_layout()
                 st.pyplot(fig)
             
-            with tab2:
-                # 3D visualization
-                fig_3d = go.Figure()
-                
-                # Add twin boundaries as surface
-                phi_gx, phi_gy = compute_gradients_numba(phi, dx)
-                grad_mag = np.sqrt(phi_gx**2 + phi_gy**2)
-                
-                fig_3d.add_trace(go.Surface(
-                    x=geom_viz.X, y=geom_viz.Y, z=grad_mag,
-                    colorscale='Viridis',
-                    opacity=0.9,
-                    name='Gradient Magnitude'
-                ))
-                
-                fig_3d.update_layout(
-                    title='3D Initial Geometry Visualization',
-                    scene=dict(
-                        xaxis_title='x (nm)',
-                        yaxis_title='y (nm)',
-                        zaxis_title='|∇φ|',
-                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                    ),
-                    height=600
-                )
-                
-                st.plotly_chart(fig_3d, use_container_width=True)
-            
-            with tab3:
-                # Analysis
-                st.subheader("📊 Detailed Analysis")
+            with col2:
+                st.subheader("Geometry Statistics")
                 
                 # Compute statistics
-                phi_gx, phi_gy = compute_gradients_numba(phi, dx)
-                h = compute_twin_spacing_numba(phi_gx, phi_gy)
-                h_valid = h[(h > 5) & (h < 50)]
+                avg_spacing = np.mean(h[(h > 5) & (h < 50)])
+                twin_area = np.sum(eta1 > 0.5) * dx**2
+                gb_length = np.sum(np.abs(eta1 - eta2) < 0.2) * dx
+                num_twins = np.sum(h < 20)
                 
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Mean φ", f"{np.mean(phi):.3f}")
-                with col2:
-                    st.metric("Std φ", f"{np.std(phi):.3f}")
-                with col3:
-                    st.metric("Mean η₁", f"{np.mean(eta1):.3f}")
-                with col4:
-                    st.metric("Mean η₂", f"{np.mean(eta2):.3f}")
+                st.metric("Average Twin Spacing", f"{avg_spacing:.1f} nm")
+                st.metric("Twin Grain Area", f"{twin_area:.0f} nm²")
+                st.metric("Grain Boundary Length", f"{gb_length:.0f} nm")
+                st.metric("Number of Twins", f"{num_twins:.0f}")
                 
-                # Histogram of twin spacing
-                fig_hist, ax = plt.subplots(figsize=(10, 4))
-                ax.hist(h_valid.flatten(), bins=30, alpha=0.7, color='green')
-                ax.axvline(x=twin_spacing, color='red', linestyle='--', label='Target spacing')
-                ax.set_xlabel('Twin Spacing (nm)')
-                ax.set_ylabel('Frequency')
-                ax.set_title('Twin Spacing Distribution')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                st.pyplot(fig_hist)
-            
-            # Run simulation button
-            st.markdown("---")
-            st.markdown("### 🚀 Run Evolution Simulation")
+                # 3D visualization toggle
+                if st.checkbox("Show 3D Visualization"):
+                    fig_3d = go.Figure()
+                    grad_mag = np.sqrt(phi_gx**2 + phi_gy**2)
+                    
+                    fig_3d.add_trace(go.Surface(
+                        x=geom_viz.X, y=geom_viz.Y, z=grad_mag,
+                        colorscale='Viridis',
+                        opacity=0.9
+                    ))
+                    
+                    fig_3d.update_layout(
+                        title='3D Gradient Magnitude',
+                        scene=dict(
+                            xaxis_title='x (nm)',
+                            yaxis_title='y (nm)',
+                            zaxis_title='|∇φ|'
+                        ),
+                        height=500
+                    )
+                    
+                    st.plotly_chart(fig_3d, use_container_width=True)
+        
+        with tab2:
+            st.header("Run Simulation")
             
             if st.button("▶️ Start Evolution", type="secondary", use_container_width=True):
                 with st.spinner("Running phase-field simulation..."):
-                    # Initialize solver with initial geometry
-                    solver = NanotwinnedCuSolver(params)
-                    solver.phi = phi.copy()
-                    solver.eta1 = eta1.copy()
-                    solver.eta2 = eta2.copy()
-                    
-                    # Progress tracking
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    # Storage for results
-                    results_history = []
-                    timesteps = []
-                    
-                    # Simulation loop
-                    for step in range(n_steps):
-                        status_text.text(f"Step {step+1}/{n_steps}")
+                    try:
+                        # Initialize solver
+                        solver = NanotwinnedCuSolver(params)
+                        solver.phi = phi.copy()
+                        solver.eta1 = eta1.copy()
+                        solver.eta2 = eta2.copy()
                         
-                        # Perform time step
-                        results = solver.step(params['applied_stress'])
+                        # Progress tracking
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        results_container = st.empty()
                         
-                        # Save results
-                        if step % save_frequency == 0:
-                            results_history.append(results.copy())
-                            timesteps.append(step * dt)
+                        # Storage for results
+                        results_history = []
+                        timesteps = []
                         
-                        progress_bar.progress((step + 1) / n_steps)
-                    
-                    st.success(f"✅ Simulation completed! Generated {len(results_history)} frames.")
-                    
-                    # Store results
-                    st.session_state.results_history = results_history
-                    st.session_state.timesteps = timesteps
-                    st.session_state.final_solver = solver
-            
-            # Display evolution results if available
+                        # Create placeholders for real-time monitoring
+                        monitoring_cols = st.columns(4)
+                        
+                        # Simulation loop
+                        for step in range(n_steps):
+                            # Update status
+                            status_text.text(f"Step {step+1}/{n_steps}")
+                            
+                            # Perform time step
+                            results = solver.step(params['applied_stress'])
+                            
+                            # Save results
+                            if step % save_frequency == 0:
+                                results_history.append(results.copy())
+                                timesteps.append(step * dt)
+                            
+                            # Update progress
+                            progress_bar.progress((step + 1) / n_steps)
+                            
+                            # Real-time monitoring (every 10 steps)
+                            if step % 10 == 0 and len(results_history) > 0:
+                                with monitoring_cols[0]:
+                                    st.metric("Avg Stress", f"{np.mean(results['sigma_eq'])/1e9:.2f} GPa")
+                                with monitoring_cols[1]:
+                                    st.metric("Avg Spacing", f"{np.mean(results['h'][(results['h']>5)&(results['h']<50)]):.1f} nm")
+                                with monitoring_cols[2]:
+                                    st.metric("Plastic Strain", f"{np.max(results['eps_p_mag']):.4f}")
+                                with monitoring_cols[3]:
+                                    st.metric("Energy", f"{results['convergence']['energy']:.2e} J")
+                        
+                        st.success(f"✅ Simulation completed! Generated {len(results_history)} frames.")
+                        
+                        # Store results
+                        st.session_state.results_history = results_history
+                        st.session_state.timesteps = timesteps
+                        st.session_state.solver = solver
+                        
+                        # Show completion message
+                        st.balloons()
+                        
+                    except Exception as e:
+                        st.error(f"Simulation failed: {str(e)}")
+                        st.info("Try adjusting parameters or reducing time step")
+        
+        with tab3:
             if 'results_history' in st.session_state:
-                st.markdown("### 📈 Evolution Results")
+                st.header("Simulation Results")
                 
-                last_results = st.session_state.results_history[-1]
+                results_history = st.session_state.results_history
+                timesteps = st.session_state.timesteps
                 
-                # Compare initial and final
-                fig_compare, axes = plt.subplots(2, 4, figsize=(16, 8))
+                # Select frame to display
+                frame_idx = st.slider("Select frame", 0, len(results_history)-1, len(results_history)-1)
+                results = results_history[frame_idx]
                 
-                # Initial state
-                axes[0, 0].imshow(phi, cmap='RdBu_r', vmin=-1.2, vmax=1.2)
-                axes[0, 0].set_title('Initial φ')
-                axes[0, 1].imshow(eta1, cmap='Reds', vmin=0, vmax=1)
-                axes[0, 1].set_title('Initial η₁')
-                phi_gx_i, phi_gy_i = compute_gradients_numba(phi, dx)
-                h_i = compute_twin_spacing_numba(phi_gx_i, phi_gy_i)
-                axes[0, 2].imshow(np.clip(h_i, 0, 50), cmap='plasma', vmin=0, vmax=30)
-                axes[0, 2].set_title('Initial Spacing')
-                axes[0, 3].imshow(eta1 > 0.5, cmap='gray')
-                axes[0, 3].set_title('Initial Twin Grain')
+                # Create comprehensive visualization
+                fig, axes = plt.subplots(2, 4, figsize=(16, 8))
                 
-                # Final state
-                axes[1, 0].imshow(last_results['phi'], cmap='RdBu_r', vmin=-1.2, vmax=1.2)
-                axes[1, 0].set_title('Final φ')
-                axes[1, 1].imshow(last_results['eta1'], cmap='Reds', vmin=0, vmax=1)
-                axes[1, 1].set_title('Final η₁')
-                axes[1, 2].imshow(np.clip(last_results['h'], 0, 50), cmap='plasma', vmin=0, vmax=30)
-                axes[1, 2].set_title('Final Spacing')
-                axes[1, 3].imshow(last_results['sigma_eq']/1e9, cmap='hot', vmin=0, vmax=2)
-                axes[1, 3].set_title('Final Stress (GPa)')
+                # Row 1: Main fields
+                axes[0, 0].imshow(results['phi'], cmap='RdBu_r', vmin=-1.2, vmax=1.2)
+                axes[0, 0].set_title('Twin Order Parameter φ')
+                
+                axes[0, 1].imshow(results['eta1'], cmap='Reds', vmin=0, vmax=1)
+                axes[0, 1].set_title('Twin Grain η₁')
+                
+                axes[0, 2].imshow(results['sigma_eq']/1e9, cmap='hot', vmin=0, vmax=2)
+                axes[0, 2].set_title('Von Mises Stress (GPa)')
+                
+                axes[0, 3].imshow(results['h'], cmap='plasma', vmin=0, vmax=30)
+                axes[0, 3].set_title('Twin Spacing (nm)')
+                
+                # Row 2: Secondary fields
+                axes[1, 0].imshow(results['sigma_y']/1e6, cmap='viridis', vmin=0, vmax=500)
+                axes[1, 0].set_title('Yield Stress (MPa)')
+                
+                axes[1, 1].imshow(results['eps_p_mag'], cmap='YlOrRd', vmin=0, vmax=0.05)
+                axes[1, 1].set_title('Plastic Strain')
+                
+                axes[1, 2].imshow(results['eps_xx'], cmap='coolwarm', vmin=-0.01, vmax=0.01)
+                axes[1, 2].set_title('Strain ε_xx')
+                
+                axes[1, 3].imshow(results['eps_xy'], cmap='coolwarm', vmin=-0.005, vmax=0.005)
+                axes[1, 3].set_title('Shear Strain ε_xy')
                 
                 for ax in axes.flat:
                     ax.set_xticks([])
                     ax.set_yticks([])
                 
                 plt.tight_layout()
-                st.pyplot(fig_compare)
+                st.pyplot(fig)
                 
-                # Evolution metrics
-                st.subheader("📊 Evolution Metrics")
+                # Convergence monitoring
+                st.subheader("Convergence Monitoring")
+                if hasattr(st.session_state.solver, 'history'):
+                    convergence_fig = SimulationMonitor.create_convergence_plots(
+                        st.session_state.solver.history, timesteps
+                    )
+                    st.pyplot(convergence_fig)
                 
-                steps_tracked = []
-                avg_spacings = []
-                avg_stresses = []
+                # Comparison with initial state
+                st.subheader("Evolution Analysis")
+                comparison_fig = SimulationMonitor.create_field_comparison_plot(
+                    results_history[0], results_history[-1], N, dx
+                )
+                st.pyplot(comparison_fig)
+        
+        with tab4:
+            st.header("Export Results")
+            
+            if 'results_history' in st.session_state:
+                # Export options
+                export_format = st.selectbox(
+                    "Export Format",
+                    ["ZIP Package (Recommended)", "NPZ Arrays", "CSV Summary", "PyTorch Tensors"]
+                )
                 
-                for i, results in enumerate(st.session_state.results_history):
-                    steps_tracked.append(i * save_frequency)
-                    h_valid = results['h'][(results['h'] > 5) & (results['h'] < 50)]
-                    avg_spacings.append(np.mean(h_valid) if len(h_valid) > 0 else 0)
-                    avg_stresses.append(np.mean(results['sigma_eq']) / 1e9)
-                
-                fig_metrics, ax = plt.subplots(1, 2, figsize=(12, 4))
-                
-                ax[0].plot(steps_tracked, avg_spacings, 'b-o', linewidth=2, markersize=4)
-                ax[0].set_xlabel('Step')
-                ax[0].set_ylabel('Avg. Twin Spacing (nm)')
-                ax[0].set_title('Twin Spacing Evolution')
-                ax[0].grid(True, alpha=0.3)
-                
-                ax[1].plot(steps_tracked, avg_stresses, 'r-o', linewidth=2, markersize=4)
-                ax[1].set_xlabel('Step')
-                ax[1].set_ylabel('Avg. Stress (GPa)')
-                ax[1].set_title('Stress Evolution')
-                ax[1].grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                st.pyplot(fig_metrics)
-                
-                # Export functionality
-                st.markdown("### 💾 Export Results")
-                
-                if st.button("📦 Generate Export Package"):
-                    with st.spinner("Preparing export package..."):
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        
-                        # Create in-memory zip
-                        zip_buffer = BytesIO()
-                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                            # Save initial geometry
-                            npz_buffer = BytesIO()
-                            np.savez(npz_buffer, 
-                                    phi_initial=phi,
-                                    eta1_initial=eta1,
-                                    eta2_initial=eta2)
-                            zip_file.writestr(f"initial_geometry_{timestamp}.npz", npz_buffer.getvalue())
+                if st.button("📦 Generate Export", type="primary"):
+                    with st.spinner("Preparing export..."):
+                        try:
+                            # Create exporter
+                            exporter = DataExporter()
                             
-                            # Save final state
-                            npz_buffer = BytesIO()
-                            np.savez(npz_buffer, 
-                                    phi_final=last_results['phi'],
-                                    eta1_final=last_results['eta1'],
-                                    eta2_final=last_results['eta2'],
-                                    sigma_eq=last_results['sigma_eq'],
-                                    h=last_results['h'],
-                                    sigma_y=last_results['sigma_y'])
-                            zip_file.writestr(f"final_state_{timestamp}.npz", npz_buffer.getvalue())
+                            # Generate export based on selected format
+                            if export_format == "ZIP Package (Recommended)":
+                                zip_buffer = exporter.export_simulation_results(
+                                    st.session_state.results_history,
+                                    params,
+                                    st.session_state.solver,
+                                    "nanotwin_simulation"
+                                )
+                                
+                                st.download_button(
+                                    label="⬇️ Download ZIP Package",
+                                    data=zip_buffer,
+                                    file_name=f"nanotwin_simulation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                                    mime="application/zip"
+                                )
+                                
+                            elif export_format == "NPZ Arrays":
+                                # Save final state as NPZ
+                                final_results = st.session_state.results_history[-1]
+                                npz_buffer = BytesIO()
+                                np.savez_compressed(npz_buffer, **final_results)
+                                
+                                st.download_button(
+                                    label="⬇️ Download NPZ File",
+                                    data=npz_buffer,
+                                    file_name=f"nanotwin_final_state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz",
+                                    mime="application/octet-stream"
+                                )
                             
-                            # Save parameters
-                            params_json = json.dumps(params, indent=2)
-                            zip_file.writestr(f"parameters_{timestamp}.json", params_json)
-                        
-                        zip_buffer.seek(0)
-                        
-                        # Download button
-                        st.download_button(
-                            label="⬇️ Download Export Package",
-                            data=zip_buffer,
-                            file_name=f"nanotwin_simulation_{timestamp}.zip",
-                            mime="application/zip"
-                        )
-                        
-                        st.success("Export package ready!")
+                            st.success("Export ready for download!")
+                            
+                        except Exception as e:
+                            st.error(f"Export failed: {str(e)}")
+            else:
+                st.info("Run a simulation first to export results")
+    
+    else:
+        # Welcome screen
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown("""
+            <div style="text-align: center; padding: 2rem;">
+                <h2>Welcome to the Nanotwinned Copper Phase-Field Simulator</h2>
+                <p>Configure simulation parameters in the sidebar and click "Initialize Simulation" to begin.</p>
+                <div style="margin-top: 2rem;">
+                    <h4>Key Features:</h4>
+                    <ul style="text-align: left; display: inline-block;">
+                        <li>Complete physics-based modeling</li>
+                        <li>Multiple geometry configurations</li>
+                        <li>Real-time monitoring and visualization</li>
+                        <li>Comprehensive export functionality</li>
+                        <li>Robust error handling and validation</li>
+                    </ul>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
