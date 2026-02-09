@@ -12,3 +12,8 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu2-streamlit-red)](https://nanotwin-structureevolution2.streamlit.app/) (Solutions of phase field elasto plastic equations without post-processing)
 
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu3-streamlit-red)](https://nanotwin-structureevolution3.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu4-streamlit-red)](https://nanotwin-structureevolution4.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing)
+
+
