@@ -12,8 +12,8 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu2-streamlit-red)](https://nanotwin-structureevolution2.streamlit.app/) (Solutions of phase field elasto plastic equations without post-processing)
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu3-streamlit-red)](https://nanotwin-structureevolution3.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing, twin containing grain more stable than the one without twin)
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu3-streamlit-red)](https://nanotwin-structureevolution3.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing, twin containing grain more stable than the one without twin, detwinning happens at both ends of the twins)
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu4-streamlit-red)](https://nanotwin-structureevolution4.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing, both grains are in equilbrium)
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu4-streamlit-red)](https://nanotwin-structureevolution4.streamlit.app/) (Solutions of phase field elasto plastic equations with post-processing, both grains are in equilbrium, detwinning happens only at the end that does not touch the grain boundary)
 
 
