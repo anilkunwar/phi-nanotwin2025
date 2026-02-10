@@ -8,6 +8,8 @@
 
 # Multiphysics simulations
 
+Model Development
+
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwinag1-streamlit-red)](https://nanotwin-structureevolution1.streamlit.app/) (Debug phase)
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu2-streamlit-red)](https://nanotwin-structureevolution2.streamlit.app/) (Solutions of phase field elasto plastic equations without post-processing)
@@ -17,3 +19,6 @@
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu4-streamlit-red)](https://nanotwin-structureevolution4.streamlit.app/) (Unphysical constraint- Volume-preserving update WITHOUT shear strain evolution: Solutions of phase field elasto plastic equations with post-processing, both grains are in equilbrium, detwinning happens only at the end that does not touch the grain boundary,  Key difference in plastic strain updates: Code 3 uses -0.5 and +0.5 factors for yy and xy strains, enabling shear, unlike Code 4's full volume preservation with no shear, Incompressibility Preserved and No Shear Plastic Strain .)
 
 
+Engineering Design with Advanced Models (nanotwincu3 model as the physically realistic base model)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu5-streamlit-red)](https://nanotwin-structurecomparison5.streamlit.app/)
