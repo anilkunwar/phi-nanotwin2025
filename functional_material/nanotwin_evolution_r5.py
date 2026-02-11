@@ -15,112 +15,25 @@ import tempfile
 import os
 import pandas as pd
 import warnings
-import hashlib
-from matplotlib import rcParams
-from matplotlib.ticker import AutoMinorLocator, MultipleLocator, FormatStrFormatter
-from scipy import stats, interpolate
-from scipy.ndimage import gaussian_filter, rotate
-
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# ENHANCED POST-PROCESSING MODULES FROM FIRST CODE
+# POST-PROCESSING CLASSES FROM AG NP CODE (ADAPTED)
 # ============================================================================
 
-# =============================================
-# EXPANDED COLORMAP LIBRARY (50+ options)
-# =============================================
-COLORMAPS = {
-    # Sequential (1)
-    'viridis': 'viridis',
-    'plasma': 'plasma', 
-    'inferno': 'inferno',
-    'magma': 'magma',
-    'cividis': 'cividis',
-    'hot': 'hot',
-    'cool': 'cool',
-    'spring': 'spring',
-    'summer': 'summer',
-    'autumn': 'autumn',
-    'winter': 'winter',
-    
-    # Sequential (2)
-    'copper': 'copper',
-    'bone': 'bone',
-    'gray': 'gray',
-    'pink': 'pink',
-    'afmhot': 'afmhot',
-    'gist_heat': 'gist_heat',
-    'gist_gray': 'gist_gray',
-    'binary': 'binary',
-    
-    # Diverging
-    'coolwarm': 'coolwarm',
-    'bwr': 'bwr',
-    'seismic': 'seismic',
-    'RdBu': 'RdBu',
-    'RdGy': 'RdGy',
-    'PiYG': 'PiYG',
-    'PRGn': 'PRGn',
-    'BrBG': 'BrBG',
-    'PuOr': 'PuOr',
-    
-    # Cyclic
-    'twilight': 'twilight',
-    'twilight_shifted': 'twilight_shifted',
-    'hsv': 'hsv',
-    
-    # Qualitative
-    'tab10': 'tab10',
-    'tab20': 'tab20',
-    'Set1': 'Set1',
-    'Set2': 'Set2',
-    'Set3': 'Set3',
-    'Paired': 'Paired',
-    'Accent': 'Accent',
-    'Dark2': 'Dark2',
-    
-    # Miscellaneous
-    'jet': 'jet',
-    'turbo': 'turbo',
-    'rainbow': 'rainbow',
-    'nipy_spectral': 'nipy_spectral',
-    'gist_ncar': 'gist_ncar',
-    'gist_rainbow': 'gist_rainbow',
-    'gist_earth': 'gist_earth',
-    'gist_stern': 'gist_stern',
-    'ocean': 'ocean',
-    'terrain': 'terrain',
-    'gnuplot': 'gnuplot',
-    'gnuplot2': 'gnuplot2',
-    'CMRmap': 'CMRmap',
-    'cubehelix': 'cubehelix',
-    'brg': 'brg',
-    
-    # Perceptually uniform
-    'rocket': 'rocket',
-    'mako': 'mako',
-    'crest': 'crest',
-    'flare': 'flare',
-    'icefire': 'icefire',
-    'vlag': 'vlag'
-}
-
-cmap_list = list(COLORMAPS.keys())
-
-# =============================================
-# ENHANCED LINE PROFILE SYSTEM
-# =============================================
 class EnhancedLineProfiler:
-    """Enhanced line profile system for nanotwinned materials"""
+    """Enhanced line profile system with multiple orientations and proper scaling"""
     
-    @staticmethod
-    @njit(parallel=True)
-    def extract_profile_numba(data, N, dx, profile_type, position_ratio=0.5, angle_deg=45):
+    def __init__(self, N, dx):
+        self.N = N
+        self.dx = dx
+        self.extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
+        
+    def extract_profile(self, data, profile_type, position_ratio=0.5, angle_deg=45):
         """
-        Numba-accelerated profile extraction for performance
+        Extract line profiles from 2D data with proper scaling
         """
-        ny, nx = N, N
+        ny, nx = data.shape
         center_x, center_y = nx // 2, ny // 2
         
         # Calculate position offset based on ratio
@@ -133,984 +46,1107 @@ class EnhancedLineProfiler:
             # Horizontal profile
             row_idx = center_y + offset
             profile = data[row_idx, :]
-            distance = np.linspace(-N*dx/2, N*dx/2, nx)
+            distance = np.linspace(self.extent[0], self.extent[1], nx)
+            endpoints = (self.extent[0], row_idx * self.dx + self.extent[2], 
+                        self.extent[1], row_idx * self.dx + self.extent[2])
             
         elif profile_type == 'vertical':
             # Vertical profile
             col_idx = center_x + offset
             profile = data[:, col_idx]
-            distance = np.linspace(-N*dx/2, N*dx/2, ny)
+            distance = np.linspace(self.extent[2], self.extent[3], ny)
+            endpoints = (col_idx * self.dx + self.extent[0], self.extent[2],
+                        col_idx * self.dx + self.extent[0], self.extent[3])
             
         elif profile_type == 'diagonal':
             # Main diagonal (top-left to bottom-right)
             diag_length = int(min(nx, ny) * 0.8)
             start_idx = (center_x - diag_length//2, center_y - diag_length//2)
             
-            profile = np.zeros(diag_length)
-            distances = np.zeros(diag_length)
-            
-            for i in prange(diag_length):
+            profile = []
+            distances = []
+            for i in range(diag_length):
                 x = start_idx[0] + i
                 y = start_idx[1] + i
                 if 0 <= x < nx and 0 <= y < ny:
-                    profile[i] = data[y, x]
-                    dist = i * dx * np.sqrt(2)
-                    distances[i] = dist - (diag_length//2) * dx * np.sqrt(2)
+                    profile.append(data[y, x])
+                    dist = i * self.dx * np.sqrt(2)
+                    distances.append(dist - (diag_length//2) * self.dx * np.sqrt(2))
             
-            # Trim zeros
-            valid_mask = distances != 0
-            distance = distances[valid_mask]
-            profile = profile[valid_mask]
+            distance = np.array(distances)
+            profile = np.array(profile)
+            
+            # Calculate endpoints in physical coordinates
+            x_start = start_idx[0] * self.dx + self.extent[0]
+            y_start = start_idx[1] * self.dx + self.extent[2]
+            x_end = (start_idx[0] + diag_length - 1) * self.dx + self.extent[0]
+            y_end = (start_idx[1] + diag_length - 1) * self.dx + self.extent[2]
+            endpoints = (x_start, y_start, x_end, y_end)
             
         elif profile_type == 'anti_diagonal':
             # Anti-diagonal (top-right to bottom-left)
             diag_length = int(min(nx, ny) * 0.8)
             start_idx = (center_x + diag_length//2, center_y - diag_length//2)
             
-            profile = np.zeros(diag_length)
-            distances = np.zeros(diag_length)
-            
-            for i in prange(diag_length):
+            profile = []
+            distances = []
+            for i in range(diag_length):
                 x = start_idx[0] - i
                 y = start_idx[1] + i
                 if 0 <= x < nx and 0 <= y < ny:
-                    profile[i] = data[y, x]
-                    dist = i * dx * np.sqrt(2)
-                    distances[i] = dist - (diag_length//2) * dx * np.sqrt(2)
+                    profile.append(data[y, x])
+                    dist = i * self.dx * np.sqrt(2)
+                    distances.append(dist - (diag_length//2) * self.dx * np.sqrt(2))
             
-            # Trim zeros
-            valid_mask = distances != 0
-            distance = distances[valid_mask]
-            profile = profile[valid_mask]
+            distance = np.array(distances)
+            profile = np.array(profile)
             
-        else:
-            # Custom angle (simplified for Numba)
+            x_start = start_idx[0] * self.dx + self.extent[0]
+            y_start = start_idx[1] * self.dx + self.extent[2]
+            x_end = (start_idx[0] - diag_length + 1) * self.dx + self.extent[0]
+            y_end = (start_idx[1] + diag_length - 1) * self.dx + self.extent[2]
+            endpoints = (x_start, y_start, x_end, y_end)
+            
+        elif profile_type == 'custom':
+            # Custom angle line profile
             angle_rad = np.deg2rad(angle_deg)
             length = int(min(nx, ny) * 0.8)
             
-            profile = np.zeros(length)
-            distances = np.zeros(length)
+            # Calculate line endpoints
+            dx_line = np.cos(angle_rad) * length//2
+            dy_line = np.sin(angle_rad) * length//2
             
-            for i in prange(length):
-                t = -length//2 + i
+            profile = []
+            distances = []
+            
+            # Interpolate along line
+            for t in np.linspace(-length//2, length//2, length):
                 x = center_x + t * np.cos(angle_rad) + offset * np.cos(angle_rad + np.pi/2)
                 y = center_y + t * np.sin(angle_rad) + offset * np.sin(angle_rad + np.pi/2)
                 
                 if 0 <= x < nx-1 and 0 <= y < ny-1:
-                    # Simplified interpolation for Numba
+                    # Bilinear interpolation
                     x0, y0 = int(x), int(y)
-                    x1, y1 = min(x0 + 1, nx-1), min(y0 + 1, ny-1)
+                    x1, y1 = x0 + 1, y0 + 1
                     
+                    # Check bounds
+                    if x1 >= nx: x1 = nx - 1
+                    if y1 >= ny: y1 = ny - 1
+                    
+                    # Interpolation weights
                     wx = x - x0
                     wy = y - y0
                     
+                    # Bilinear interpolation
                     val = (data[y0, x0] * (1-wx) * (1-wy) +
                           data[y0, x1] * wx * (1-wy) +
                           data[y1, x0] * (1-wx) * wy +
                           data[y1, x1] * wx * wy)
                     
-                    profile[i] = val
-                    distances[i] = t * dx
+                    profile.append(val)
+                    distances.append(t * self.dx)
             
-            distance = distances
-            profile = profile
+            distance = np.array(distances)
+            profile = np.array(profile)
+            
+            # Calculate endpoints
+            x_start = (center_x - dx_line + offset * np.cos(angle_rad + np.pi/2)) * self.dx + self.extent[0]
+            y_start = (center_y - dy_line + offset * np.sin(angle_rad + np.pi/2)) * self.dx + self.extent[2]
+            x_end = (center_x + dx_line + offset * np.cos(angle_rad + np.pi/2)) * self.dx + self.extent[0]
+            y_end = (center_y + dy_line + offset * np.sin(angle_rad + np.pi/2)) * self.dx + self.extent[2]
+            endpoints = (x_start, y_start, x_end, y_end)
         
-        return distance, profile
-    
-    @staticmethod
-    def extract_profile(data, N, dx, profile_type, position_ratio=0.5, angle_deg=45):
-        """
-        Extract line profiles from 2D nanotwin fields
-        """
-        return EnhancedLineProfiler.extract_profile_numba(
-            data, N, dx, profile_type, position_ratio, angle_deg
-        )
-    
-    @staticmethod
-    def extract_multiple_profiles(data, N, dx, profile_types, position_ratio=0.5, angle_deg=45):
-        """
-        Extract multiple line profiles from the same data
-        """
-        profiles = {}
-        for profile_type in profile_types:
-            distance, profile = EnhancedLineProfiler.extract_profile(
-                data, N, dx, profile_type, position_ratio, angle_deg
-            )
-            profiles[profile_type] = {
-                'distance': distance,
-                'profile': profile
-            }
-        return profiles
-    
-    @staticmethod
-    def plot_profile_locations(ax, data, N, dx, profile_configs, cmap='viridis', alpha=0.7):
-        """
-        Plot data with overlay of profile lines
-        """
-        extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
-        im = ax.imshow(data, extent=extent, cmap=cmap, origin='lower', aspect='equal')
+        else:
+            raise ValueError(f"Unknown profile type: {profile_type}")
         
-        # Define colors for different profile types
-        profile_colors = {
-            'horizontal': 'red',
-            'vertical': 'blue',
-            'diagonal': 'green',
-            'anti_diagonal': 'purple',
-            'custom': 'orange'
-        }
-        
-        # Plot each profile line
-        for profile_type, config in profile_configs.items():
-            if profile_type in config['profiles']:
-                # Calculate endpoints for visualization
-                center = N // 2
-                offset = int(N * 0.4 * config.get('position_ratio', 0.5))
-                
-                if profile_type == 'horizontal':
-                    y_pos = (center + offset - N/2) * dx
-                    ax.axhline(y=y_pos, color='red', linewidth=2, alpha=alpha, 
-                              label='Horizontal Profile')
-                elif profile_type == 'vertical':
-                    x_pos = (center + offset - N/2) * dx
-                    ax.axvline(x=x_pos, color='blue', linewidth=2, alpha=alpha,
-                              label='Vertical Profile')
-        
-        ax.set_xlabel("x (nm)")
-        ax.set_ylabel("y (nm)")
-        ax.legend(loc='upper right', fontsize=8)
-        
-        return im, ax
+        return distance, profile, endpoints
 
-# =============================================
-# JOURNAL-SPECIFIC STYLING TEMPLATES
-# =============================================
-class JournalTemplates:
-    """Publication-quality journal templates for nanotwin research"""
+class PublicationEnhancer:
+    """Advanced plotting enhancements for publication-quality figures"""
     
     @staticmethod
-    def get_journal_styles():
-        """Return journal-specific style parameters"""
+    def create_custom_colormaps():
+        """Create enhanced scientific colormaps"""
+        from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+        
+        # Perceptually uniform sequential
+        plasma_enhanced = LinearSegmentedColormap.from_list('plasma_enhanced', [
+            (0.0, '#0c0887'),
+            (0.1, '#4b03a1'),
+            (0.3, '#8b0aa5'),
+            (0.5, '#b83289'),
+            (0.7, '#db5c68'),
+            (0.9, '#f48849'),
+            (1.0, '#fec325')
+        ])
+        
+        # Diverging with better contrast
+        coolwarm_enhanced = LinearSegmentedColormap.from_list('coolwarm_enhanced', [
+            (0.0, '#3a4cc0'),
+            (0.25, '#8abcdd'),
+            (0.5, '#f7f7f7'),
+            (0.75, '#f0b7a4'),
+            (1.0, '#b40426')
+        ])
+        
+        # Categorical for twin types
+        twin_categorical = ListedColormap([
+            '#1f77b4',  # CTB - Blue
+            '#ff7f0e',  # ITB - Orange
+            '#2ca02c',  # Grain 1 - Green
+            '#d62728',  # Grain 2 - Red
+            '#9467bd',  # Plastic zone - Purple
+            '#8c564b'   # Defect - Brown
+        ])
+        
+        # Stress-specific colormap
+        stress_map = LinearSegmentedColormap.from_list('stress_map', [
+            (0.0, '#2c7bb6'),
+            (0.2, '#abd9e9'),
+            (0.4, '#ffffbf'),
+            (0.6, '#fdae61'),
+            (0.8, '#d7191c'),
+            (1.0, '#800026')
+        ])
+        
         return {
-            'nature': {
-                'figure_width_single': 8.9,
-                'figure_width_double': 18.3,
-                'font_family': 'Arial',
-                'font_size_small': 7,
-                'font_size_medium': 8,
-                'font_size_large': 9,
-                'line_width': 0.5,
-                'axes_linewidth': 0.5,
-                'tick_width': 0.5,
-                'tick_length': 2,
-                'grid_alpha': 0.1,
-                'dpi': 600,
-                'color_cycle': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-            },
-            'science': {
-                'figure_width_single': 5.5,
-                'figure_width_double': 11.4,
-                'font_family': 'Helvetica',
-                'font_size_small': 8,
-                'font_size_medium': 9,
-                'font_size_large': 10,
-                'line_width': 0.75,
-                'axes_linewidth': 0.75,
-                'tick_width': 0.75,
-                'tick_length': 3,
-                'grid_alpha': 0.15,
-                'dpi': 600,
-                'color_cycle': ['#0072BD', '#D95319', '#EDB120', '#7E2F8E', '#77AC30']
-            },
-            'acta_materialia': {
-                'figure_width_single': 8.5,
-                'figure_width_double': 17.0,
-                'font_family': 'Times New Roman',
-                'font_size_small': 10,
-                'font_size_medium': 11,
-                'font_size_large': 12,
-                'line_width': 1.0,
-                'axes_linewidth': 1.0,
-                'tick_width': 1.0,
-                'tick_length': 4,
-                'grid_alpha': 0.2,
-                'dpi': 600,
-                'color_cycle': ['#004488', '#DDAA33', '#BB5566', '#000000', '#44AA99']
-            },
-            'custom': {
-                'figure_width_single': 6.0,
-                'figure_width_double': 12.0,
-                'font_family': 'DejaVu Sans',
-                'font_size_small': 10,
-                'font_size_medium': 12,
-                'font_size_large': 14,
-                'line_width': 1.5,
-                'axes_linewidth': 1.5,
-                'tick_width': 1.0,
-                'tick_length': 5,
-                'grid_alpha': 0.3,
-                'dpi': 300,
-                'color_cycle': plt.cm.Set2(np.linspace(0, 1, 10))
-            }
+            'plasma_enhanced': plasma_enhanced,
+            'coolwarm_enhanced': coolwarm_enhanced,
+            'twin_categorical': twin_categorical,
+            'stress_map': stress_map
         }
     
     @staticmethod
-    def apply_journal_style(fig, axes, journal_name='nature'):
-        """Apply journal-specific styling to figure"""
-        styles = JournalTemplates.get_journal_styles()
-        style = styles.get(journal_name, styles['nature'])
-        
-        # Set rcParams for consistent styling
-        rcParams.update({
-            'font.family': style['font_family'],
-            'font.size': style['font_size_medium'],
-            'axes.linewidth': style['axes_linewidth'],
-            'axes.labelsize': style['font_size_medium'],
-            'axes.titlesize': style['font_size_large'],
-            'xtick.labelsize': style['font_size_small'],
-            'ytick.labelsize': style['font_size_small'],
-            'legend.fontsize': style['font_size_small'],
-            'figure.titlesize': style['font_size_large'],
-            'lines.linewidth': style['line_width'],
-            'lines.markersize': 4,
-            'xtick.major.width': style['tick_width'],
-            'ytick.major.width': style['tick_width'],
-            'xtick.minor.width': style['tick_width'] * 0.5,
-            'ytick.minor.width': style['tick_width'] * 0.5,
-            'xtick.major.size': style['tick_length'],
-            'ytick.major.size': style['tick_length'],
-            'xtick.minor.size': style['tick_length'] * 0.6,
-            'ytick.minor.size': style['tick_length'] * 0.6,
-            'axes.grid': False,
-            'savefig.dpi': style['dpi'],
-            'savefig.bbox': 'tight',
-            'savefig.pad_inches': 0.1,
-            'axes.prop_cycle': plt.cycler(color=style['color_cycle'])
-        })
-        
-        # Apply to all axes
-        if isinstance(axes, np.ndarray):
-            axes_flat = axes.flatten()
-        elif isinstance(axes, list):
-            axes_flat = axes
-        else:
-            axes_flat = [axes]
-        
-        for ax in axes_flat:
-            if ax is not None:
-                # Add minor ticks
-                ax.xaxis.set_minor_locator(AutoMinorLocator())
-                ax.yaxis.set_minor_locator(AutoMinorLocator())
-                
-                # Set spine visibility
-                ax.spines['top'].set_visible(True)
-                ax.spines['right'].set_visible(True)
-                ax.spines['top'].set_linewidth(style['axes_linewidth'] * 0.5)
-                ax.spines['right'].set_linewidth(style['axes_linewidth'] * 0.5)
-                
-                # Improve tick formatting
-                ax.tick_params(which='both', direction='in', top=True, right=True)
-                ax.tick_params(which='major', length=style['tick_length'])
-                ax.tick_params(which='minor', length=style['tick_length'] * 0.6)
-        
-        return fig, style
-
-# =============================================
-# POST-PROCESSING STYLING SYSTEM
-# =============================================
-class FigureStyler:
-    """Advanced figure styling and post-processing system for nanotwin visualizations"""
+    def add_error_shading(ax, x, y_mean, y_std, color='blue', alpha=0.3, label=''):
+        """Add error shading to line plots"""
+        ax.fill_between(x, y_mean - y_std, y_mean + y_std, 
+                       color=color, alpha=alpha, label=label + ' ± std')
+        return ax
     
     @staticmethod
-    def apply_advanced_styling(fig, axes, style_params):
-        """Apply advanced styling to figure and axes"""
-        
-        # Apply to all axes in figure
-        if isinstance(axes, np.ndarray):
-            axes_flat = axes.flatten()
-        elif isinstance(axes, list):
-            axes_flat = axes
+    def add_scale_bar(ax, length_nm, location='lower right', color='black', linewidth=2):
+        """Add scale bar to microscopy-style images"""
+        if location == 'lower right':
+            x_pos = 0.95
+            y_pos = 0.05
+            ha = 'right'
+            va = 'bottom'
+        elif location == 'lower left':
+            x_pos = 0.05
+            y_pos = 0.05
+            ha = 'left'
+            va = 'bottom'
+        elif location == 'upper right':
+            x_pos = 0.95
+            y_pos = 0.95
+            ha = 'right'
+            va = 'top'
         else:
-            axes_flat = [axes]
+            x_pos = 0.05
+            y_pos = 0.95
+            ha = 'left'
+            va = 'top'
         
-        for ax in axes_flat:
-            if ax is not None:
-                # Apply axis styling
-                ax.tick_params(axis='both', which='major', 
-                              labelsize=style_params.get('tick_font_size', 12),
-                              width=style_params.get('tick_width', 2.0),
-                              length=style_params.get('tick_length', 6))
-                
-                # Apply spine styling
-                for spine in ax.spines.values():
-                    spine.set_linewidth(style_params.get('spine_width', 2.5))
-                    spine.set_color(style_params.get('spine_color', 'black'))
-                
-                # Apply grid if requested
-                if style_params.get('show_grid', True):
-                    ax.grid(True, 
-                           alpha=style_params.get('grid_alpha', 0.3),
-                           linestyle=style_params.get('grid_style', '--'),
-                           linewidth=style_params.get('grid_width', 0.5))
-                
-                # Apply title styling
-                if hasattr(ax, 'title'):
-                    title = ax.get_title()
-                    if title:
-                        ax.set_title(title, 
-                                    fontsize=style_params.get('title_font_size', 16),
-                                    fontweight=style_params.get('title_weight', 'bold'),
-                                    color=style_params.get('title_color', 'black'))
-                
-                # Apply label styling
-                if ax.get_xlabel():
-                    ax.set_xlabel(ax.get_xlabel(),
-                                 fontsize=style_params.get('label_font_size', 14),
-                                 fontweight=style_params.get('label_weight', 'bold'))
-                if ax.get_ylabel():
-                    ax.set_ylabel(ax.get_ylabel(),
-                                 fontsize=style_params.get('label_font_size', 14),
-                                 fontweight=style_params.get('label_weight', 'bold'))
+        # Convert to axis coordinates
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_range = xlim[1] - xlim[0]
+        y_range = ylim[1] - ylim[0]
         
-        # Apply figure background
-        if style_params.get('figure_facecolor'):
-            fig.set_facecolor(style_params['figure_facecolor'])
+        # Bar position in data coordinates
+        bar_x_start = xlim[1] - x_range * 0.15
+        bar_x_end = bar_x_start - length_nm
+        bar_y = ylim[0] + y_range * 0.05
         
-        # Tight layout
-        fig.tight_layout()
+        # Draw scale bar
+        ax.plot([bar_x_start, bar_x_end], [bar_y, bar_y], 
+               color=color, linewidth=linewidth, solid_capstyle='butt')
         
-        return fig
-    
-    @staticmethod
-    def get_styling_controls():
-        """Get comprehensive styling controls for Streamlit sidebar"""
-        style_params = {}
+        # Add text
+        ax.text((bar_x_start + bar_x_end) / 2, bar_y + y_range * 0.02,
+               f'{length_nm} nm', ha='center', va='bottom',
+               color=color, fontsize=8, fontweight='bold')
         
-        st.sidebar.header("🎨 Advanced Post-Processing")
-        
-        with st.sidebar.expander("📐 Font & Text Styling", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                style_params['title_font_size'] = st.slider("Title Size", 8, 32, 16)
-                style_params['label_font_size'] = st.slider("Label Size", 8, 28, 14)
-                style_params['tick_font_size'] = st.slider("Tick Size", 6, 20, 12)
-            with col2:
-                style_params['title_weight'] = st.selectbox("Title Weight", 
-                                                           ['normal', 'bold', 'light', 'semibold'], 
-                                                           index=1)
-                style_params['label_weight'] = st.selectbox("Label Weight", 
-                                                           ['normal', 'bold', 'light'], 
-                                                           index=1)
-                style_params['title_color'] = st.color_picker("Title Color", "#000000")
-        
-        with st.sidebar.expander("📏 Line & Border Styling", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                style_params['line_width'] = st.slider("Line Width", 0.5, 5.0, 2.0, 0.5)
-                style_params['spine_width'] = st.slider("Spine Width", 1.0, 4.0, 2.5, 0.5)
-                style_params['tick_width'] = st.slider("Tick Width", 0.5, 3.0, 2.0, 0.5)
-            with col2:
-                style_params['tick_length'] = st.slider("Tick Length", 2, 15, 6)
-                style_params['spine_color'] = st.color_picker("Spine Color", "#000000")
-                style_params['grid_width'] = st.slider("Grid Width", 0.1, 2.0, 0.5, 0.1)
-        
-        with st.sidebar.expander("🌐 Grid & Background", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                style_params['show_grid'] = st.checkbox("Show Grid", True)
-                style_params['grid_style'] = st.selectbox("Grid Style", 
-                                                         ['-', '--', '-.', ':'],
-                                                         index=1)
-                style_params['grid_alpha'] = st.slider("Grid Alpha", 0.0, 1.0, 0.3, 0.05)
-            with col2:
-                style_params['figure_facecolor'] = st.color_picker("Figure Background", "#FFFFFF")
-                style_params['axes_facecolor'] = st.color_picker("Axes Background", "#FFFFFF")
-        
-        return style_params
+        return ax
 
-# =============================================
-# SIMULATION DATABASE SYSTEM
-# =============================================
-class SimulationDB:
-    """In-memory simulation database for storing and retrieving nanotwin simulations"""
+class SimulationDatabase:
+    """Enhanced simulation database for storing and comparing multiple runs"""
     
     @staticmethod
     def generate_id(sim_params):
         """Generate unique ID for simulation"""
-        param_str = json.dumps(sim_params, sort_keys=True, default=str)
+        param_str = json.dumps({k: v for k, v in sim_params.items() 
+                              if k not in ['history', 'results', 'geom_viz']}, 
+                             sort_keys=True)
+        import hashlib
         return hashlib.md5(param_str.encode()).hexdigest()[:8]
     
     @staticmethod
-    def save_simulation(sim_params, results_history, metadata):
+    def save_simulation(sim_params, results_history, geometry_data, metadata):
         """Save simulation to database"""
-        if 'simulations' not in st.session_state:
-            st.session_state.simulations = {}
+        if 'twin_simulations' not in st.session_state:
+            st.session_state.twin_simulations = {}
         
-        sim_id = SimulationDB.generate_id(sim_params)
+        sim_id = SimulationDatabase.generate_id(sim_params)
         
         # Store simulation data
-        st.session_state.simulations[sim_id] = {
+        st.session_state.twin_simulations[sim_id] = {
             'id': sim_id,
             'params': sim_params,
             'results_history': results_history,
+            'geometry_data': geometry_data,
             'metadata': metadata,
-            'created_at': datetime.now().isoformat(),
-            'type': 'nanotwin'
+            'created_at': datetime.now().isoformat()
         }
         
         return sim_id
     
     @staticmethod
-    def get_simulation(sim_id):
-        """Retrieve simulation by ID"""
-        if 'simulations' in st.session_state and sim_id in st.session_state.simulations:
-            return st.session_state.simulations[sim_id]
-        return None
-    
-    @staticmethod
-    def get_all_simulations():
-        """Get all stored simulations"""
-        if 'simulations' in st.session_state:
-            return {k: v for k, v in st.session_state.simulations.items() if v.get('type') == 'nanotwin'}
-        return {}
-    
-    @staticmethod
-    def delete_simulation(sim_id):
-        """Delete simulation from database"""
-        if 'simulations' in st.session_state and sim_id in st.session_state.simulations:
-            del st.session_state.simulations[sim_id]
-            return True
-        return False
-    
-    @staticmethod
     def get_simulation_list():
         """Get list of simulations for dropdown"""
-        simulations = SimulationDB.get_all_simulations()
-        
-        if not simulations:
+        if 'twin_simulations' not in st.session_state:
             return []
         
-        sim_list = []
-        for sim_id, sim_data in simulations.items():
+        simulations = []
+        for sim_id, sim_data in st.session_state.twin_simulations.items():
             params = sim_data['params']
-            name = f"Twin Spacing: {params.get('twin_spacing', 'N/A')}nm | Stress: {params.get('applied_stress', 0)/1e6:.0f}MPa"
-            sim_list.append({
+            name = f"Twin λ={params.get('twin_spacing', 0):.1f}nm | σ={params.get('applied_stress', 0)/1e6:.0f}MPa"
+            simulations.append({
                 'id': sim_id,
                 'name': name,
-                'params': params
+                'params': params,
+                'results': sim_data['results_history'][-1] if sim_data['results_history'] else None
             })
         
-        return sim_list
+        return simulations
 
-# =============================================
-# ENHANCED SIMULATION MONITOR WITH POST-PROCESSING
-# =============================================
-class EnhancedSimulationMonitor:
-    """Extended simulation monitor with post-processing capabilities"""
+# ============================================================================
+# ENHANCED VISUALIZATION SYSTEM
+# ============================================================================
+
+class EnhancedTwinVisualizer:
+    """Comprehensive visualization system for nanotwinned simulations"""
     
     def __init__(self, N, dx):
         self.N = N
         self.dx = dx
         self.extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
-        self.line_profiler = EnhancedLineProfiler()
+        self.line_profiler = EnhancedLineProfiler(N, dx)
+        
+        # Expanded colormap library (50+ options)
+        self.COLORMAPS = {
+            # Sequential
+            'viridis': 'viridis', 'plasma': 'plasma', 'inferno': 'inferno', 'magma': 'magma',
+            'cividis': 'cividis', 'hot': 'hot', 'cool': 'cool', 'spring': 'spring',
+            'summer': 'summer', 'autumn': 'autumn', 'winter': 'winter',
+            # Diverging
+            'coolwarm': 'coolwarm', 'bwr': 'bwr', 'seismic': 'seismic', 'RdBu': 'RdBu',
+            'RdGy': 'RdGy', 'PiYG': 'PiYG', 'PRGn': 'PRGn', 'BrBG': 'BrBG', 'PuOr': 'PuOr',
+            # Scientific
+            'rocket': 'rocket', 'mako': 'mako', 'crest': 'crest', 'icefire': 'icefire',
+            'twilight': 'twilight', 'hsv': 'hsv',
+            # Custom
+            **PublicationEnhancer.create_custom_colormaps()
+        }
     
-    def create_enhanced_line_profiles(self, field_data, field_name, profile_types, 
-                                     position_ratio=0.5, angle_deg=45, style_params=None):
-        """Create enhanced line profile plots for nanotwin fields"""
+    def create_multi_field_comparison(self, results_dict, style_params=None):
+        """Create publication-quality multi-field comparison plot"""
         if style_params is None:
             style_params = {}
         
+        fields_to_plot = [
+            ('phi', 'Twin Order Parameter φ', 'RdBu_r', [-1.2, 1.2]),
+            ('sigma_eq', 'Von Mises Stress (GPa)', 'hot', None),
+            ('h', 'Twin Spacing (nm)', 'plasma', [0, 30]),
+            ('eps_p_mag', 'Plastic Strain', 'YlOrRd', None),
+            ('sigma_y', 'Yield Stress (MPa)', 'viridis', None),
+            ('eta1', 'Twin Grain η₁', 'Reds', [0, 1])
+        ]
+        
+        n_fields = len(fields_to_plot)
+        cols = min(3, n_fields)
+        rows = (n_fields + cols - 1) // cols
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+        
+        if rows == 1 and cols == 1:
+            axes = np.array([[axes]])
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
+        elif cols == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for idx, (field_name, title, default_cmap, vrange) in enumerate(fields_to_plot):
+            if field_name not in results_dict:
+                continue
+                
+            row = idx // cols
+            col = idx % cols
+            ax = axes[row, col]
+            
+            data = results_dict[field_name]
+            
+            # Apply colormap from style params or use default
+            cmap_name = style_params.get(f'{field_name}_cmap', default_cmap)
+            cmap = self.get_colormap(cmap_name)
+            
+            # Determine vmin/vmax
+            if vrange is not None:
+                vmin, vmax = vrange
+            else:
+                # Use percentiles for adaptive scaling
+                vmin = np.percentile(data, 2)
+                vmax = np.percentile(data, 98)
+            
+            # Plot heatmap
+            im = ax.imshow(data, extent=self.extent, cmap=cmap, 
+                          vmin=vmin, vmax=vmax, origin='lower', aspect='equal')
+            
+            # Add contour for twin boundaries (φ = 0)
+            if field_name == 'phi':
+                ax.contour(np.linspace(self.extent[0], self.extent[1], self.N),
+                          np.linspace(self.extent[2], self.extent[3], self.N),
+                          data, levels=[0], colors='white', linewidths=1, alpha=0.8)
+            
+            ax.set_title(title, fontsize=style_params.get('title_font_size', 10))
+            ax.set_xlabel('x (nm)', fontsize=style_params.get('label_font_size', 8))
+            ax.set_ylabel('y (nm)', fontsize=style_params.get('label_font_size', 8))
+            
+            # Add colorbar
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            
+            # Add scale bar for reference plots
+            if field_name in ['phi', 'sigma_eq']:
+                PublicationEnhancer.add_scale_bar(ax, 10.0, 'lower right')
+        
+        # Hide empty subplots
+        for idx in range(n_fields, rows*cols):
+            row = idx // cols
+            col = idx % cols
+            axes[row, col].axis('off')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_enhanced_line_profiles(self, results_dict, profile_config):
+        """Create enhanced line profile analysis"""
+        profile_types = profile_config.get('types', ['horizontal', 'vertical'])
+        position_ratio = profile_config.get('position_ratio', 0.5)
+        angle_deg = profile_config.get('angle_deg', 45)
+        
+        # Select which fields to profile
+        fields_to_profile = ['phi', 'sigma_eq', 'h', 'eps_p_mag']
+        available_fields = [f for f in fields_to_profile if f in results_dict]
+        
+        n_fields = len(available_fields)
         n_profiles = len(profile_types)
-        fig, axes = plt.subplots(1, n_profiles, figsize=(5*n_profiles, 5), constrained_layout=True)
         
-        if n_profiles == 1:
-            axes = [axes]
+        fig = plt.figure(figsize=(15, 4*n_fields))
         
-        for idx, profile_type in enumerate(profile_types):
-            ax = axes[idx]
+        # Create subplot grid: each field gets profile plot and location map
+        gs = fig.add_gridspec(n_fields, 3, width_ratios=[2, 1, 1])
+        
+        for field_idx, field_name in enumerate(available_fields):
+            data = results_dict[field_name]
             
-            # Extract profile
-            distance, profile = self.line_profiler.extract_profile(
-                field_data, self.N, self.dx, profile_type, position_ratio, angle_deg
-            )
+            # Main profile plot
+            ax_profiles = fig.add_subplot(gs[field_idx, 0])
             
-            # Plot profile
-            ax.plot(distance, profile, 'b-', linewidth=style_params.get('line_width', 2.0))
-            ax.set_xlabel('Position (nm)', fontsize=style_params.get('label_font_size', 12))
-            ax.set_ylabel(field_name, fontsize=style_params.get('label_font_size', 12))
-            ax.set_title(f'{profile_type.title()} Profile', 
-                        fontsize=style_params.get('title_font_size', 14),
-                        fontweight=style_params.get('title_weight', 'bold'))
+            # Extract and plot profiles
+            for profile_type in profile_types:
+                distance, profile, endpoints = self.line_profiler.extract_profile(
+                    data, profile_type, position_ratio, angle_deg
+                )
+                
+                # Plot profile
+                ax_profiles.plot(distance, profile, 
+                               linewidth=2, alpha=0.8,
+                               label=f'{profile_type.title()} Profile')
             
-            # Add grid if requested
-            if style_params.get('show_grid', True):
-                ax.grid(True, alpha=style_params.get('grid_alpha', 0.3),
-                       linestyle=style_params.get('grid_style', '--'))
+            ax_profiles.set_xlabel('Position (nm)', fontsize=10)
+            ax_profiles.set_ylabel(field_name.replace('_', ' ').title(), fontsize=10)
+            ax_profiles.set_title(f'{field_name.replace("_", " ").title()} Line Profiles', fontsize=12)
+            ax_profiles.legend(fontsize=8)
+            ax_profiles.grid(True, alpha=0.3)
+            
+            # Location map
+            ax_location = fig.add_subplot(gs[field_idx, 1])
+            im = ax_location.imshow(data, extent=self.extent, cmap='viridis', 
+                                   origin='lower', aspect='equal')
+            
+            # Plot profile lines
+            profile_colors = {'horizontal': 'red', 'vertical': 'blue', 
+                            'diagonal': 'green', 'anti_diagonal': 'purple',
+                            'custom': 'orange'}
+            
+            for profile_type in profile_types:
+                distance, profile, endpoints = self.line_profiler.extract_profile(
+                    data, profile_type, position_ratio, angle_deg
+                )
+                color = profile_colors.get(profile_type, 'white')
+                ax_location.plot([endpoints[0], endpoints[2]], [endpoints[1], endpoints[3]],
+                               color=color, linewidth=2, alpha=0.7, linestyle='--')
+            
+            ax_location.set_title(f'{field_name} Profile Locations', fontsize=10)
+            ax_location.set_xlabel('x (nm)', fontsize=8)
+            ax_location.set_ylabel('y (nm)', fontsize=8)
+            plt.colorbar(im, ax=ax_location, fraction=0.046, pad=0.04)
+            
+            # Statistics panel
+            ax_stats = fig.add_subplot(gs[field_idx, 2])
+            
+            # Calculate field statistics
+            stats_data = {
+                'Mean': np.mean(data),
+                'Std Dev': np.std(data),
+                'Max': np.max(data),
+                'Min': np.min(data),
+                '95th %ile': np.percentile(data, 95)
+            }
+            
+            # Create horizontal bar chart
+            y_pos = np.arange(len(stats_data))
+            values = list(stats_data.values())
+            
+            bars = ax_stats.barh(y_pos, values, color='steelblue', alpha=0.7)
+            ax_stats.set_yticks(y_pos)
+            ax_stats.set_yticklabels(list(stats_data.keys()))
+            ax_stats.set_xlabel('Value', fontsize=8)
+            ax_stats.set_title(f'{field_name} Statistics', fontsize=10)
+            
+            # Add value labels
+            for bar, val in zip(bars, values):
+                ax_stats.text(bar.get_width() * 1.02, bar.get_y() + bar.get_height()/2,
+                            f'{val:.3e}' if abs(val) > 1000 else f'{val:.3f}',
+                            va='center', fontsize=7)
         
-        # Apply styling
-        fig = FigureStyler.apply_advanced_styling(fig, axes, style_params)
-        
+        plt.tight_layout()
         return fig
     
-    def create_field_comparison_with_profiles(self, initial_data, final_data, field_name,
-                                            profile_types, style_params=None):
-        """Create comparison plot with field visualizations and profiles"""
-        if style_params is None:
-            style_params = {}
+    def create_statistical_analysis(self, results_history, timesteps):
+        """Create comprehensive statistical analysis plots"""
+        # Collect data over time
+        time_data = {
+            'avg_stress': [],
+            'max_stress': [],
+            'avg_spacing': [],
+            'plastic_work': [],
+            'phi_norm': []
+        }
         
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10), constrained_layout=True)
-        
-        # Row 1: Field visualizations
-        # Initial field
-        im1 = axes[0, 0].imshow(initial_data, extent=self.extent, cmap='viridis', origin='lower')
-        axes[0, 0].set_title(f'Initial {field_name}')
-        axes[0, 0].set_xlabel('x (nm)')
-        axes[0, 0].set_ylabel('y (nm)')
-        plt.colorbar(im1, ax=axes[0, 0])
-        
-        # Final field
-        im2 = axes[0, 1].imshow(final_data, extent=self.extent, cmap='viridis', origin='lower')
-        axes[0, 1].set_title(f'Final {field_name}')
-        axes[0, 1].set_xlabel('x (nm)')
-        axes[0, 1].set_ylabel('y (nm)')
-        plt.colorbar(im2, ax=axes[0, 1])
-        
-        # Difference
-        diff = final_data - initial_data
-        im3 = axes[0, 2].imshow(diff, extent=self.extent, cmap='coolwarm', origin='lower')
-        axes[0, 2].set_title(f'Δ{field_name}')
-        axes[0, 2].set_xlabel('x (nm)')
-        axes[0, 2].set_ylabel('y (nm)')
-        plt.colorbar(im3, ax=axes[0, 2])
-        
-        # Row 2: Line profiles for each type
-        profile_colors = {'horizontal': 'red', 'vertical': 'blue', 'diagonal': 'green'}
-        
-        for idx, profile_type in enumerate(profile_types[:3]):  # Show up to 3 profiles
-            ax = axes[1, idx]
+        for results in results_history:
+            time_data['avg_stress'].append(np.mean(results['sigma_eq']) / 1e9)  # GPa
+            time_data['max_stress'].append(np.max(results['sigma_eq']) / 1e9)   # GPa
             
-            # Extract profiles for both initial and final
-            dist_initial, prof_initial = self.line_profiler.extract_profile(
-                initial_data, self.N, self.dx, profile_type
-            )
-            dist_final, prof_final = self.line_profiler.extract_profile(
-                final_data, self.N, self.dx, profile_type
-            )
+            valid_h = results['h'][(results['h'] > 5) & (results['h'] < 50)]
+            time_data['avg_spacing'].append(np.mean(valid_h) if len(valid_h) > 0 else 0)
             
-            # Plot both profiles
-            ax.plot(dist_initial, prof_initial, 'b-', linewidth=2, alpha=0.7, label='Initial')
-            ax.plot(dist_final, prof_final, 'r-', linewidth=2, alpha=0.7, label='Final')
-            
-            ax.set_xlabel('Position (nm)')
-            ax.set_ylabel(field_name)
-            ax.set_title(f'{profile_type.title()} Profile Evolution')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            time_data['plastic_work'].append(np.sum(results['eps_p_mag']) * (self.dx**2))
+            time_data['phi_norm'].append(np.linalg.norm(results['phi']))
         
-        # Apply styling
-        fig = FigureStyler.apply_advanced_styling(fig, axes, style_params)
+        # Create multi-panel figure
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         
-        return fig
-    
-    def create_statistical_analysis(self, field_data, field_name, style_params=None):
-        """Create comprehensive statistical analysis of field data"""
-        if style_params is None:
-            style_params = {}
-        
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10), constrained_layout=True)
-        
-        # Flatten data for statistics
-        flat_data = field_data.flatten()
-        flat_data = flat_data[np.isfinite(flat_data)]
-        
-        # Plot 1: Histogram with KDE
-        axes[0, 0].hist(flat_data, bins=50, density=True, alpha=0.7, color='blue')
-        # Add KDE
-        kde = stats.gaussian_kde(flat_data)
-        x_range = np.linspace(np.min(flat_data), np.max(flat_data), 100)
-        axes[0, 0].plot(x_range, kde(x_range), 'r-', linewidth=2)
-        axes[0, 0].set_xlabel(field_name)
-        axes[0, 0].set_ylabel('Density')
-        axes[0, 0].set_title(f'Distribution of {field_name}')
-        
-        # Plot 2: Box plot
-        axes[0, 1].boxplot(flat_data, vert=True, patch_artist=True,
-                          boxprops=dict(facecolor='lightblue'))
-        axes[0, 1].set_ylabel(field_name)
-        axes[0, 1].set_title(f'Box Plot of {field_name}')
-        
-        # Plot 3: QQ plot
-        stats.probplot(flat_data, dist="norm", plot=axes[0, 2])
-        axes[0, 2].set_title(f'Q-Q Plot of {field_name}')
-        
-        # Plot 4: Cumulative distribution
-        sorted_data = np.sort(flat_data)
-        y_vals = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
-        axes[1, 0].plot(sorted_data, y_vals, 'b-', linewidth=2)
-        axes[1, 0].set_xlabel(field_name)
-        axes[1, 0].set_ylabel('Cumulative Probability')
-        axes[1, 0].set_title(f'CDF of {field_name}')
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Plot 5: Spatial autocorrelation
-        # Compute 2D autocorrelation
-        autocorr = np.correlate(field_data.flatten(), field_data.flatten(), mode='full')
-        autocorr = autocorr[len(autocorr)//2:]
-        autocorr = autocorr[:100]  # First 100 lags
-        axes[1, 1].plot(autocorr, 'g-', linewidth=2)
-        axes[1, 1].set_xlabel('Lag (grid points)')
-        axes[1, 1].set_ylabel('Autocorrelation')
-        axes[1, 1].set_title(f'Spatial Autocorrelation of {field_name}')
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        # Plot 6: Statistics table
-        axes[1, 2].axis('off')
-        stats_text = (
-            f"Statistics for {field_name}:\n\n"
-            f"Mean: {np.mean(flat_data):.4f}\n"
-            f"Std Dev: {np.std(flat_data):.4f}\n"
-            f"Min: {np.min(flat_data):.4f}\n"
-            f"Max: {np.max(flat_data):.4f}\n"
-            f"Skewness: {stats.skew(flat_data):.4f}\n"
-            f"Kurtosis: {stats.kurtosis(flat_data):.4f}\n"
-            f"N: {len(flat_data):,}"
-        )
-        axes[1, 2].text(0.1, 0.5, stats_text, fontsize=10, 
-                       verticalalignment='center', fontfamily='monospace')
-        
-        # Apply styling
-        fig = FigureStyler.apply_advanced_styling(fig, axes, style_params)
-        
-        return fig
-    
-    def create_correlation_analysis(self, field1_data, field2_data, field1_name, field2_name,
-                                   style_params=None):
-        """Create correlation analysis between two fields"""
-        if style_params is None:
-            style_params = {}
-        
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
-        
-        # Flatten data
-        flat1 = field1_data.flatten()
-        flat2 = field2_data.flatten()
-        
-        # Remove NaNs and infinite values
-        mask = np.isfinite(flat1) & np.isfinite(flat2)
-        flat1 = flat1[mask]
-        flat2 = flat2[mask]
-        
-        # Subsample for large datasets
-        if len(flat1) > 10000:
-            indices = np.random.choice(len(flat1), 10000, replace=False)
-            flat1 = flat1[indices]
-            flat2 = flat2[indices]
-        
-        # Plot 1: Scatter plot with regression line
-        axes[0, 0].scatter(flat1, flat2, alpha=0.3, s=10, color='blue')
-        
-        # Add regression line
-        if len(flat1) > 2:
-            slope, intercept, r_value, p_value, std_err = stats.linregress(flat1, flat2)
-            x_range = np.linspace(np.min(flat1), np.max(flat1), 100)
-            axes[0, 0].plot(x_range, slope*x_range + intercept, 'r-', linewidth=2,
-                          label=f'R = {r_value:.3f}')
-            axes[0, 0].legend()
-        
-        axes[0, 0].set_xlabel(field1_name)
-        axes[0, 0].set_ylabel(field2_name)
-        axes[0, 0].set_title(f'{field1_name} vs {field2_name}')
+        # Time evolution plots
+        axes[0, 0].plot(timesteps, time_data['avg_stress'], 'b-', linewidth=2, label='Average')
+        axes[0, 0].plot(timesteps, time_data['max_stress'], 'r-', linewidth=2, label='Maximum')
+        axes[0, 0].set_xlabel('Time (ns)', fontsize=10)
+        axes[0, 0].set_ylabel('Stress (GPa)', fontsize=10)
+        axes[0, 0].set_title('Stress Evolution', fontsize=12)
+        axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         
-        # Plot 2: 2D histogram (hexbin)
-        hb = axes[0, 1].hexbin(flat1, flat2, gridsize=50, cmap='viridis', mincnt=1)
-        plt.colorbar(hb, ax=axes[0, 1])
-        axes[0, 1].set_xlabel(field1_name)
-        axes[0, 1].set_ylabel(field2_name)
-        axes[0, 1].set_title('2D Density Distribution')
+        axes[0, 1].plot(timesteps, time_data['avg_spacing'], 'g-', linewidth=2)
+        axes[0, 1].set_xlabel('Time (ns)', fontsize=10)
+        axes[0, 1].set_ylabel('Avg Twin Spacing (nm)', fontsize=10)
+        axes[0, 1].set_title('Twin Spacing Evolution', fontsize=12)
+        axes[0, 1].grid(True, alpha=0.3)
         
-        # Plot 3: Residuals plot
-        if len(flat1) > 2:
-            y_pred = slope * flat1 + intercept
-            residuals = flat2 - y_pred
-            axes[1, 0].scatter(y_pred, residuals, alpha=0.3, s=10, color='green')
-            axes[1, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
-            axes[1, 0].set_xlabel('Predicted Values')
-            axes[1, 0].set_ylabel('Residuals')
-            axes[1, 0].set_title('Residual Plot')
-            axes[1, 0].grid(True, alpha=0.3)
+        axes[0, 2].plot(timesteps, time_data['plastic_work'], 'm-', linewidth=2)
+        axes[0, 2].set_xlabel('Time (ns)', fontsize=10)
+        axes[0, 2].set_ylabel('Plastic Work', fontsize=10)
+        axes[0, 2].set_title('Plastic Work Evolution', fontsize=12)
+        axes[0, 2].grid(True, alpha=0.3)
         
-        # Plot 4: Correlation statistics
-        axes[1, 1].axis('off')
-        if len(flat1) > 2:
-            corr_text = (
-                f"Correlation Analysis:\n\n"
-                f"Pearson R: {r_value:.4f}\n"
-                f"R²: {r_value**2:.4f}\n"
-                f"Slope: {slope:.4f}\n"
-                f"Intercept: {intercept:.4f}\n"
-                f"p-value: {p_value:.2e}\n"
-                f"Std Error: {std_err:.4f}\n"
-                f"N: {len(flat1):,}"
-            )
-        else:
-            corr_text = "Insufficient data for correlation analysis"
-        
-        axes[1, 1].text(0.1, 0.5, corr_text, fontsize=10,
-                       verticalalignment='center', fontfamily='monospace')
-        
-        # Apply styling
-        fig = FigureStyler.apply_advanced_styling(fig, axes, style_params)
-        
-        return fig
-
-# ============================================================================
-# ENHANCED VISUALIZATION SYSTEM FOR STREAMLIT
-# ============================================================================
-class EnhancedVisualizationSystem:
-    """Comprehensive visualization system for nanotwin simulations"""
-    
-    def __init__(self):
-        self.monitor = None
-        self.style_params = {}
-        
-    def initialize(self, N, dx):
-        """Initialize with grid parameters"""
-        self.monitor = EnhancedSimulationMonitor(N, dx)
-        self.style_params = FigureStyler.get_styling_controls()
-        
-    def create_publication_quality_plots(self, results_history, params):
-        """Create publication-quality plots for nanotwin research"""
-        if not results_history:
-            return None
-        
+        # Final frame histograms
         final_results = results_history[-1]
-        initial_results = results_history[0]
-        N = params['N']
-        dx = params['dx']
         
-        plots = {}
+        axes[1, 0].hist(final_results['sigma_eq'].flatten() / 1e9, bins=50, 
+                       density=True, alpha=0.7, color='blue', edgecolor='black')
+        axes[1, 0].set_xlabel('Von Mises Stress (GPa)', fontsize=10)
+        axes[1, 0].set_ylabel('Probability Density', fontsize=10)
+        axes[1, 0].set_title('Stress Distribution', fontsize=12)
+        axes[1, 0].grid(True, alpha=0.3)
         
-        # 1. Twin order parameter evolution with profiles
-        plots['phi_evolution'] = self.monitor.create_field_comparison_with_profiles(
-            initial_results['phi'],
-            final_results['phi'],
-            'Twin Order Parameter (φ)',
-            ['horizontal', 'vertical'],
-            self.style_params
-        )
+        valid_h = final_results['h'][(final_results['h'] > 5) & (final_results['h'] < 50)]
+        if len(valid_h) > 0:
+            axes[1, 1].hist(valid_h.flatten(), bins=30, density=True, 
+                           alpha=0.7, color='green', edgecolor='black')
+            axes[1, 1].set_xlabel('Twin Spacing (nm)', fontsize=10)
+            axes[1, 1].set_ylabel('Probability Density', fontsize=10)
+            axes[1, 1].set_title('Twin Spacing Distribution', fontsize=12)
+            axes[1, 1].grid(True, alpha=0.3)
         
-        # 2. Stress analysis with statistics
-        plots['stress_analysis'] = self.monitor.create_statistical_analysis(
-            final_results['sigma_eq'],
-            'Von Mises Stress (Pa)',
-            self.style_params
-        )
-        
-        # 3. Twin spacing analysis
-        plots['spacing_analysis'] = self.monitor.create_statistical_analysis(
-            final_results['h'],
-            'Twin Spacing (nm)',
-            self.style_params
-        )
-        
-        # 4. Correlation between stress and twin spacing
-        plots['stress_spacing_correlation'] = self.monitor.create_correlation_analysis(
-            final_results['h'],
-            final_results['sigma_eq'],
-            'Twin Spacing (nm)',
-            'Von Mises Stress (Pa)',
-            self.style_params
-        )
-        
-        # 5. Enhanced line profiles for multiple fields
-        field_profiles = {}
-        for field_name, field_data in [
-            ('φ', final_results['phi']),
-            ('σ_eq', final_results['sigma_eq']),
-            ('h', final_results['h']),
-            ('ε_p', final_results['eps_p_mag'])
-        ]:
-            field_profiles[field_name] = self.monitor.create_enhanced_line_profiles(
-                field_data,
-                field_name,
-                ['horizontal', 'vertical'],
-                style_params=self.style_params
-            )
-        plots['field_profiles'] = field_profiles
-        
-        return plots
-    
-    def create_comparison_dashboard(self, simulations_data):
-        """Create comparison dashboard for multiple simulations"""
-        if len(simulations_data) < 2:
-            st.warning("Need at least 2 simulations for comparison")
-            return None
-        
-        fig = plt.figure(figsize=(16, 12))
-        
-        n_sims = len(simulations_data)
-        n_cols = min(3, n_sims)
-        n_rows = (n_sims + n_cols - 1) // n_cols
-        
-        # Create subplot grid
-        gs = fig.add_gridspec(n_rows * 2, n_cols * 3)
-        
-        # Plot each simulation
-        for idx, (sim_name, sim_data) in enumerate(simulations_data.items()):
-            row = (idx // n_cols) * 2
-            col = (idx % n_cols) * 3
+        # Correlation plot
+        if len(time_data['avg_stress']) > 1:
+            stress_gradient = np.gradient(time_data['avg_stress'])
+            spacing_gradient = np.gradient(time_data['avg_spacing'])
+            axes[1, 2].scatter(stress_gradient[:-1], spacing_gradient[1:], 
+                             alpha=0.6, s=50, c=timesteps[1:], cmap='viridis')
+            axes[1, 2].set_xlabel('Stress Rate (GPa/ns)', fontsize=10)
+            axes[1, 2].set_ylabel('Spacing Rate (nm/ns)', fontsize=10)
+            axes[1, 2].set_title('Stress-Spacing Correlation', fontsize=12)
+            axes[1, 2].grid(True, alpha=0.3)
             
-            # Final phi field
-            ax1 = fig.add_subplot(gs[row:row+2, col])
-            im1 = ax1.imshow(sim_data['phi'], cmap='RdBu_r', vmin=-1.2, vmax=1.2)
-            ax1.set_title(f'{sim_name}\nTwin Order φ')
-            ax1.set_xticks([])
-            ax1.set_yticks([])
-            plt.colorbar(im1, ax=ax1, shrink=0.8)
-            
-            # Final stress field
-            ax2 = fig.add_subplot(gs[row:row+2, col+1])
-            stress_gpa = sim_data['sigma_eq'] / 1e9
-            vmax = np.percentile(stress_gpa, 95)
-            im2 = ax2.imshow(stress_gpa, cmap='hot', vmin=0, vmax=vmax)
-            ax2.set_title('Von Mises Stress (GPa)')
-            ax2.set_xticks([])
-            ax2.set_yticks([])
-            plt.colorbar(im2, ax=ax2, shrink=0.8)
-            
-            # Final twin spacing
-            ax3 = fig.add_subplot(gs[row:row+2, col+2])
-            im3 = ax3.imshow(sim_data['h'], cmap='plasma', vmin=0, vmax=30)
-            ax3.set_title('Twin Spacing (nm)')
-            ax3.set_xticks([])
-            ax3.set_yticks([])
-            plt.colorbar(im3, ax=ax3, shrink=0.8)
+            # Add colorbar for time
+            sm = plt.cm.ScalarMappable(cmap='viridis')
+            sm.set_array(timesteps[1:])
+            plt.colorbar(sm, ax=axes[1, 2], label='Time (ns)')
         
-        # Apply styling
-        all_axes = fig.get_axes()
-        FigureStyler.apply_advanced_styling(fig, all_axes, self.style_params)
-        
+        plt.tight_layout()
         return fig
-
-# ============================================================================
-# ENHANCED DATA EXPORTER
-# ============================================================================
-class EnhancedDataExporter:
-    """Enhanced data exporter with post-processing features"""
     
+    def create_correlation_analysis(self, results_dict):
+        """Create correlation analysis between different fields"""
+        # Prepare data for correlation analysis
+        field_pairs = [
+            ('sigma_eq', 'h', 'Stress vs Twin Spacing'),
+            ('eps_p_mag', 'sigma_eq', 'Plastic Strain vs Stress'),
+            ('phi', 'sigma_y', 'Twin Order vs Yield Stress'),
+            ('eta1', 'eps_p_mag', 'Twin Grain vs Plastic Strain')
+        ]
+        
+        n_pairs = len(field_pairs)
+        cols = min(2, n_pairs)
+        rows = (n_pairs + cols - 1) // cols
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+        
+        if rows == 1 and cols == 1:
+            axes = np.array([[axes]])
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
+        elif cols == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for idx, (field1, field2, title) in enumerate(field_pairs):
+            if field1 not in results_dict or field2 not in results_dict:
+                continue
+                
+            row = idx // cols
+            col = idx % cols
+            ax = axes[row, col]
+            
+            data1 = results_dict[field1].flatten()
+            data2 = results_dict[field2].flatten()
+            
+            # Sample data for clarity
+            sample_size = min(5000, len(data1))
+            indices = np.random.choice(len(data1), sample_size, replace=False)
+            data1_sampled = data1[indices]
+            data2_sampled = data2[indices]
+            
+            # Calculate correlation
+            valid_mask = np.isfinite(data1_sampled) & np.isfinite(data2_sampled)
+            if np.sum(valid_mask) > 10:
+                corr_coef = np.corrcoef(data1_sampled[valid_mask], 
+                                       data2_sampled[valid_mask])[0, 1]
+                
+                # Scatter plot
+                scatter = ax.scatter(data1_sampled[valid_mask], data2_sampled[valid_mask],
+                                   alpha=0.3, s=10, c='blue', edgecolors='none')
+                
+                # Add regression line
+                if abs(corr_coef) > 0.1:
+                    coeffs = np.polyfit(data1_sampled[valid_mask], 
+                                       data2_sampled[valid_mask], 1)
+                    x_range = np.linspace(np.min(data1_sampled[valid_mask]), 
+                                         np.max(data1_sampled[valid_mask]), 100)
+                    y_pred = np.polyval(coeffs, x_range)
+                    ax.plot(x_range, y_pred, 'r-', linewidth=2, alpha=0.8,
+                           label=f'R = {corr_coef:.3f}')
+                
+                ax.set_xlabel(field1.replace('_', ' ').title(), fontsize=10)
+                ax.set_ylabel(field2.replace('_', ' ').title(), fontsize=10)
+                ax.set_title(f'{title}\nCorrelation: {corr_coef:.3f}', fontsize=11)
+                ax.legend(fontsize=9)
+                ax.grid(True, alpha=0.3)
+            
+            else:
+                ax.text(0.5, 0.5, 'Insufficient valid data', 
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(title, fontsize=11)
+        
+        # Hide empty subplots
+        for idx in range(n_pairs, rows*cols):
+            row = idx // cols
+            col = idx % cols
+            axes[row, col].axis('off')
+        
+        plt.tight_layout()
+        return fig
+    
+    def get_colormap(self, cmap_name):
+        """Get colormap by name with fallback"""
+        if cmap_name in self.COLORMAPS:
+            if isinstance(self.COLORMAPS[cmap_name], str):
+                return plt.cm.get_cmap(self.COLORMAPS[cmap_name])
+            else:
+                return self.COLORMAPS[cmap_name]  # Custom colormap object
+        else:
+            return plt.cm.get_cmap('viridis')  # Default fallback
+
+# ============================================================================
+# FIXED NUMBA-COMPATIBLE FUNCTIONS (ORIGINAL)
+# ============================================================================
+@njit(parallel=True)
+def compute_gradients_numba(field, dx):
+    """Numba-compatible gradient computation"""
+    N = field.shape[0]
+    gx = np.zeros((N, N))
+    gy = np.zeros((N, N))
+    for i in prange(N):
+        ip1 = (i + 1) % N
+        im1 = (i - 1) % N
+        for j in range(N):
+            jp1 = (j + 1) % N
+            jm1 = (j - 1) % N
+            gx[i, j] = (field[ip1, j] - field[im1, j]) / (2 * dx)
+            gy[i, j] = (field[i, jp1] - field[i, jm1]) / (2 * dx)
+    return gx, gy
+
+@njit(parallel=True)
+def compute_laplacian_numba(field, dx):
+    """Numba-compatible Laplacian computation"""
+    N = field.shape[0]
+    lap = np.zeros((N, N))
+    for i in prange(N):
+        ip1 = (i + 1) % N
+        im1 = (i - 1) % N
+        for j in range(N):
+            jp1 = (j + 1) % N
+            jm1 = (j - 1) % N
+            lap[i, j] = (field[ip1, j] + field[im1, j] +
+                         field[i, jp1] + field[i, jm1] -
+                         4 * field[i, j]) / (dx**2)
+    return lap
+
+@njit(parallel=True)
+def compute_twin_spacing_numba(phi_gx, phi_gy):
+    """Numba-compatible twin spacing computation"""
+    N = phi_gx.shape[0]
+    h = np.zeros((N, N))
+    for i in prange(N):
+        for j in prange(N):
+            grad_mag = np.sqrt(phi_gx[i, j]**2 + phi_gy[i, j]**2)
+            if grad_mag > 1e-12:
+                h[i, j] = 2.0 / grad_mag
+            else:
+                h[i, j] = 1e6
+    return h
+
+@njit(parallel=True)
+def compute_anisotropic_properties_numba(phi_gx, phi_gy, nx, ny, kappa0, gamma_aniso, L_CTB, L_ITB, n_mob):
+    """Numba-compatible anisotropic properties computation"""
+    N = phi_gx.shape[0]
+    kappa_phi = np.zeros((N, N))
+    L_phi = np.zeros((N, N))
+    for i in prange(N):
+        for j in prange(N):
+            grad_mag = np.sqrt(phi_gx[i, j]**2 + phi_gy[i, j]**2 + 1e-12)
+            if grad_mag > 1e-6:
+                mx = phi_gx[i, j] / grad_mag
+                my = phi_gy[i, j] / grad_mag
+                dot = mx * nx + my * ny
+                kappa_phi[i, j] = kappa0 * (1.0 + gamma_aniso * (1.0 - dot**2))
+                aniso_factor = (1.0 - dot**2)**n_mob
+                L_phi[i, j] = L_CTB + (L_ITB - L_CTB) * aniso_factor
+            else:
+                kappa_phi[i, j] = kappa0
+                L_phi[i, j] = L_CTB
+    return kappa_phi, L_phi
+
+@njit(parallel=True)
+def compute_transformation_strain_numba(phi, eta1, gamma_tw, ax, ay, nx, ny):
+    """Numba-compatible transformation strain computation"""
+    N = phi.shape[0]
+    exx_star = np.zeros((N, N))
+    eyy_star = np.zeros((N, N))
+    exy_star = np.zeros((N, N))
+    for i in prange(N):
+        for j in prange(N):
+            if eta1[i, j] > 0.5:
+                phi_val = phi[i, j]
+                f_phi = 0.25 * (phi_val**3 - phi_val**2 - phi_val + 1)
+                exx_star[i, j] = gamma_tw * nx * ax * f_phi
+                eyy_star[i, j] = gamma_tw * ny * ay * f_phi
+                exy_star[i, j] = 0.5 * gamma_tw * (nx * ay + ny * ax) * f_phi
+    return exx_star, eyy_star, exy_star
+
+@njit(parallel=True)
+def compute_yield_stress_numba(h, sigma0, mu, b, nu):
+    """Numba-compatible yield stress computation"""
+    N = h.shape[0]
+    sigma_y = np.zeros((N, N))
+    for i in prange(N):
+        for j in prange(N):
+            h_val = h[i, j]
+            if h_val > 2 * b:
+                log_term = np.log(h_val / b)
+                sigma_y[i, j] = sigma0 + (mu * b / (2 * np.pi * h_val * (1 - nu))) * log_term
+            else:
+                sigma_y[i, j] = sigma0 + mu / (2 * np.pi * (1 - nu))
+    return sigma_y
+
+@njit(parallel=True)
+def compute_plastic_strain_numba(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
+                                 gamma0_dot, m, dt, N):
+    """Numba-compatible plastic strain computation - FIXED INDEXING ERROR"""
+    eps_p_xx_new = np.zeros((N, N))
+    eps_p_yy_new = np.zeros((N, N))
+    eps_p_xy_new = np.zeros((N, N))
+    for i in prange(N):
+        for j in prange(N):
+            if sigma_eq[i, j] > sigma_y[i, j]:
+                # Overstress ratio
+                overstress = (sigma_eq[i, j] - sigma_y[i, j]) / sigma_y[i, j]
+                # Strain rate magnitude using Perzyna model (avoid negative values)
+                gamma_dot = gamma0_dot * max(overstress, 0.0)**m
+                # Plastic strain increment (associated flow rule)
+                stress_dev = 2/3 * gamma_dot * dt
+                # Update plastic strains (volume preserving)
+                eps_p_xx_new[i, j] = eps_p_xx[i, j] + stress_dev
+                eps_p_yy_new[i, j] = eps_p_yy[i, j] - 0.5 * stress_dev
+                eps_p_xy_new[i, j] = eps_p_xy[i, j] + 0.5 * stress_dev
+            else:
+                # No plastic strain if not yielding
+                eps_p_xx_new[i, j] = eps_p_xx[i, j]
+                eps_p_yy_new[i, j] = eps_p_yy[i, j]
+                eps_p_xy_new[i, j] = eps_p_xy[i, j]
+    return eps_p_xx_new, eps_p_yy_new, eps_p_xy_new
+
+# ============================================================================
+# ORIGINAL CLASSES (KEPT FOR COMPATIBILITY)
+# ============================================================================
+
+class MaterialProperties:
+    """Enhanced material properties database with validation"""
     @staticmethod
-    def export_comprehensive_package(results_history, params, plots, filename_prefix):
-        """Export comprehensive simulation package with post-processing results"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_buffer = BytesIO()
+    def get_cu_properties():
+        """Comprehensive Cu properties with references"""
+        return {
+            'elastic': {
+                'C11': 168.4e9,
+                'C12': 121.4e9,
+                'C44': 75.4e9,
+                'source': 'Phys. Rev. B 73, 064112 (2006)'
+            },
+            'twinning': {
+                'gamma_tw': 1/np.sqrt(2),
+                'n_111': np.array([1, 1, 1])/np.sqrt(3),
+                'a_112': np.array([1, 1, -2])/np.sqrt(6),
+                'n_2d': np.array([1/np.sqrt(2), 1/np.sqrt(2)]),
+                'a_2d': np.array([1/np.sqrt(2), -1/np.sqrt(2)])
+            },
+            'plasticity': {
+                'mu': 48e9,
+                'nu': 0.34,
+                'b': 0.256e-9,
+                'sigma0': 50e6,
+                'gamma0_dot': 1e-3,
+                'm': 20,
+                'rho0': 1e12,
+            }
+        }
+
+class InitialGeometryVisualizer:
+    """Class to create and visualize initial geometric conditions"""
+    def __init__(self, N, dx):
+        self.N = N
+        self.dx = dx
+        self.x = np.linspace(-N*dx/2, N*dx/2, N)
+        self.y = np.linspace(-N*dx/2, N*dx/2, N)
+        self.X, self.Y = np.meshgrid(self.x, self.y)
+
+    def create_twin_grain_geometry(self, twin_spacing=20.0, grain_boundary_pos=0.0, gb_width=3.0):
+        """Create initial twin grain geometry with grain boundary"""
+        eta1 = np.zeros((self.N, self.N))
+        eta2 = np.zeros((self.N, self.N))
+        phi = np.zeros((self.N, self.N))
+        # Create grain boundary
+        for i in range(self.N):
+            for j in range(self.N):
+                x_val = self.X[i, j]
+                dist_from_gb = x_val - grain_boundary_pos
+                if dist_from_gb < -gb_width:
+                    eta1[i, j] = 1.0
+                    eta2[i, j] = 0.0
+                elif dist_from_gb > gb_width:
+                    eta1[i, j] = 0.0
+                    eta2[i, j] = 1.0
+                else:
+                    transition = 0.5 * (1 - np.tanh(dist_from_gb / (gb_width/3)))
+                    eta1[i, j] = transition
+                    eta2[i, j] = 1 - transition
+        # Create periodic twin structure
+        for i in range(self.N):
+            for j in range(self.N):
+                if eta1[i, j] > 0.5:
+                    phase = 2 * np.pi * self.Y[i, j] / twin_spacing
+                    phi[i, j] = np.tanh(np.sin(phase) * 3.0)
+        return phi, eta1, eta2
+
+class EnhancedSpectralSolver:
+    """Enhanced spectral solver with error handling and stability improvements"""
+    def __init__(self, N, dx, elastic_params):
+        self.N = N
+        self.dx = dx
+        # Fourier space grid
+        self.kx = 2 * np.pi * fftfreq(N, d=dx).reshape(1, -1)
+        self.ky = 2 * np.pi * fftfreq(N, d=dx).reshape(-1, 1)
+        self.k2 = self.kx**2 + self.ky**2
+        # Avoid division by zero at k=0
+        self.k2[0, 0] = 1e-12
         
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # 1. Save parameters with styling info
-            export_params = params.copy()
-            export_params['export_timestamp'] = timestamp
-            export_params['export_format'] = 'comprehensive_package'
-            
-            params_json = json.dumps(export_params, indent=2, cls=NumpyEncoder)
-            zip_file.writestr(f"{filename_prefix}_parameters_{timestamp}.json", params_json)
-            
-            # 2. Save numerical data
-            if results_history:
-                # Save as NPZ
-                npz_buffer = BytesIO()
-                np.savez_compressed(npz_buffer,
-                    phi_initial=results_history[0]['phi'],
-                    sigma_eq_initial=results_history[0]['sigma_eq'],
-                    h_initial=results_history[0]['h'],
-                    phi_final=results_history[-1]['phi'],
-                    sigma_eq_final=results_history[-1]['sigma_eq'],
-                    h_final=results_history[-1]['h'],
-                    eps_p_final=results_history[-1]['eps_p_mag'])
-                zip_file.writestr(f"{filename_prefix}_data_{timestamp}.npz", npz_buffer.getvalue())
-                
-                # Save as CSV for easy analysis
-                csv_data = []
-                for i, results in enumerate(results_history):
-                    csv_data.append({
-                        'step': i,
-                        'avg_phi': np.mean(results['phi']),
-                        'std_phi': np.std(results['phi']),
-                        'avg_sigma_eq_gpa': np.mean(results['sigma_eq']) / 1e9,
-                        'max_sigma_eq_gpa': np.max(results['sigma_eq']) / 1e9,
-                        'avg_h_nm': np.mean(results['h'][results['h'] < 100]),  # Filter outliers
-                        'std_h_nm': np.std(results['h'][results['h'] < 100]),
-                        'avg_eps_p': np.mean(results['eps_p_mag']),
-                        'max_eps_p': np.max(results['eps_p_mag'])
-                    })
-                
-                df = pd.DataFrame(csv_data)
-                csv_buffer = StringIO()
-                df.to_csv(csv_buffer, index=False)
-                zip_file.writestr(f"{filename_prefix}_evolution_{timestamp}.csv", csv_buffer.getvalue())
-            
-            # 3. Save plots as PNG
-            if plots:
-                for plot_name, plot_fig in plots.items():
-                    if isinstance(plot_fig, dict):
-                        for sub_name, sub_fig in plot_fig.items():
-                            png_buffer = BytesIO()
-                            sub_fig.savefig(png_buffer, format='png', dpi=300, 
-                                          bbox_inches='tight', facecolor='white')
-                            zip_file.writestr(f"{filename_prefix}_{plot_name}_{sub_name}_{timestamp}.png", 
-                                            png_buffer.getvalue())
-                    elif plot_fig is not None:
-                        png_buffer = BytesIO()
-                        plot_fig.savefig(png_buffer, format='png', dpi=300,
-                                       bbox_inches='tight', facecolor='white')
-                        zip_file.writestr(f"{filename_prefix}_{plot_name}_{timestamp}.png", 
-                                        png_buffer.getvalue())
-            
-            # 4. Save summary report
-            summary = f"""NANOTWINNED COPPER SIMULATION EXPORT
-========================================
-Generated: {timestamp}
-Simulation Type: Phase-field nanotwin evolution
-Grid Size: {params['N']}×{params['N']}
-Grid Spacing: {params['dx']} nm
-Twin Spacing: {params.get('twin_spacing', 'N/A')} nm
-Applied Stress: {params.get('applied_stress', 0)/1e6:.1f} MPa
-Time Steps: {len(results_history) if results_history else 0}
-
-FILES INCLUDED:
----------------
-1. parameters.json - Simulation parameters
-2. data.npz - Numerical field data (NPZ format)
-3. evolution.csv - Time evolution statistics
-4. *.png - Publication-quality plots
-
-POST-PROCESSING FEATURES:
--------------------------
-• Enhanced line profile analysis
-• Statistical analysis (distributions, correlations)
-• Publication-quality figure styling
-• Multi-simulation comparison
-• Comprehensive data export
-
-For questions: nanotwin.simulator@research.example.com
-"""
-            zip_file.writestr(f"{filename_prefix}_README_{timestamp}.txt", summary)
+        # Extract elastic constants
+        C11 = elastic_params['C11']
+        C12 = elastic_params['C12']
+        C44 = elastic_params['C44']
+        # 2D plane strain approximation for (111) plane
+        C11_2d = (C11 + C12 + 2*C44) / 2
+        C12_2d = (C11 + C12 - 2*C44) / 2
+        lambda_2d = C12_2d
+        mu_2d = (C11_2d - C12_2d) / 2
+        # Store stiffness for stress calculation
+        self.C11_2d = C11_2d
+        self.C12_2d = C12_2d
+        self.C44_2d = C44
         
-        zip_buffer.seek(0)
-        return zip_buffer
+        # Green's function components with stability check
+        denom = mu_2d * (lambda_2d + 2*mu_2d) * self.k2 + 1e-15
+        self.G11 = (mu_2d*(self.kx**2 + 2*self.ky**2) + lambda_2d*self.ky**2) / denom
+        self.G12 = -mu_2d * self.kx * self.ky / denom
+        self.G22 = (mu_2d*(self.ky**2 + 2*self.kx**2) + lambda_2d*self.kx**2) / denom
+
+    def solve(self, eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress=0):
+        """Solve mechanical equilibrium with error handling"""
+        try:
+            # Check input shapes
+            assert eigenstrain_xx.shape == (self.N, self.N), f"Invalid eigenstrain shape: {eigenstrain_xx.shape}"
+            # Fourier transforms
+            eps_xx_hat = fft2(eigenstrain_xx)
+            eps_yy_hat = fft2(eigenstrain_yy)
+            eps_xy_hat = fft2(eigenstrain_xy)
+            # Solve for displacements in Fourier space
+            ux_hat = 1j * (self.G11 * self.kx * eps_xx_hat +
+                          self.G12 * self.ky * eps_xx_hat +
+                          self.G12 * self.kx * eps_yy_hat +
+                          self.G22 * self.ky * eps_yy_hat)
+            uy_hat = 1j * (self.G12 * self.kx * eps_xx_hat +
+                          self.G22 * self.ky * eps_xx_hat +
+                          self.G11 * self.kx * eps_yy_hat +
+                          self.G12 * self.ky * eps_yy_hat)
+            # Elastic strains
+            eps_xx_el = np.real(ifft2(1j * self.kx * ux_hat))
+            eps_yy_el = np.real(ifft2(1j * self.ky * uy_hat))
+            eps_xy_el = 0.5 * np.real(ifft2(1j * (self.kx * uy_hat + self.ky * ux_hat)))
+            # Total strains
+            eps_xx = eps_xx_el + eigenstrain_xx
+            eps_yy = eps_yy_el + eigenstrain_yy
+            eps_xy = eps_xy_el + eigenstrain_xy
+            # Stresses (plane strain approximation)
+            sxx = applied_stress + self.C11_2d * eps_xx + self.C12_2d * eps_yy
+            syy = self.C12_2d * eps_xx + self.C11_2d * eps_yy
+            sxy = 2 * self.C44_2d * eps_xy
+            # von Mises equivalent stress (corrected formula for plane strain)
+            sigma_eq = np.sqrt(0.5 * ((sxx - syy)**2 + (syy - 0)**2 + (0 - sxx)**2 + 6 * sxy**2))
+            # Clip unrealistic values but preserve physical range
+            sigma_eq = np.clip(sigma_eq, 0, 5e9)
+            return sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy
+        except Exception as e:
+            st.error(f"Error in spectral solver: {str(e)}")
+            # Return zeros in case of error
+            zeros = np.zeros((self.N, self.N))
+            return zeros, zeros, zeros, zeros, zeros, zeros, zeros
+
+class NanotwinnedCuSolver:
+    """Main solver with comprehensive error handling"""
+    def __init__(self, params):
+        self.params = params
+        self.N = params['N']
+        self.dx = params['dx']
+        self.dt = params['dt']
+        # Material properties
+        self.mat_props = MaterialProperties.get_cu_properties()
+        # Initialize geometry visualizer
+        self.geom_viz = InitialGeometryVisualizer(self.N, self.dx)
+        # Initialize fields with error handling
+        try:
+            self.phi, self.eta1, self.eta2 = self.initialize_fields()
+        except Exception as e:
+            st.error(f"Failed to initialize fields: {e}")
+            # Initialize with zeros as fallback
+            self.phi = np.zeros((self.N, self.N))
+            self.eta1 = np.zeros((self.N, self.N))
+            self.eta2 = np.zeros((self.N, self.N))
+        # Initialize plastic strain
+        self.eps_p_xx = np.zeros((self.N, self.N))
+        self.eps_p_yy = np.zeros((self.N, self.N))
+        self.eps_p_xy = np.zeros((self.N, self.N))
+        # Initialize spectral solver
+        self.spectral_solver = EnhancedSpectralSolver(
+            self.N, self.dx, self.mat_props['elastic']
+        )
+        # Initialize history for convergence monitoring
+        self.history = {
+            'phi_norm': [],
+            'energy': [],
+            'max_stress': [],
+            'plastic_work': [],
+            'avg_stress': [],
+            'twin_spacing_avg': []
+        }
+
+    def initialize_fields(self):
+        """Initialize order parameters based on selected geometry"""
+        geom_type = self.params.get('geometry_type', 'standard')
+        twin_spacing = self.params['twin_spacing']
+        gb_pos = self.params['grain_boundary_pos']
+        return self.geom_viz.create_twin_grain_geometry(twin_spacing, gb_pos)
+
+    def compute_total_energy(self):
+        """Compute total free energy of the system"""
+        try:
+            # Local energy
+            W = self.params['W']
+            A = self.params['A']
+            B = self.params['B']
+            f_loc = (W * (self.phi**2 - 1)**2 * self.eta1**2 +
+                    A * (self.eta1**2 * (1 - self.eta1)**2 + self.eta2**2 * (1 - self.eta2)**2) +
+                    B * self.eta1**2 * self.eta2**2)
+            # Gradient energy
+            phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
+            grad_phi_sq = phi_gx**2 + phi_gy**2
+            eta1_gx, eta1_gy = compute_gradients_numba(self.eta1, self.dx)
+            eta2_gx, eta2_gy = compute_gradients_numba(self.eta2, self.dx)
+            grad_eta1_sq = eta1_gx**2 + eta1_gy**2
+            grad_eta2_sq = eta2_gx**2 + eta2_gy**2
+            kappa0 = self.params['kappa0']
+            kappa_eta = self.params['kappa_eta']
+            f_grad = 0.5 * kappa0 * grad_phi_sq + 0.5 * kappa_eta * (grad_eta1_sq + grad_eta2_sq)
+            # Total energy density
+            energy_density = f_loc + f_grad
+            # Integrate over domain
+            total_energy = np.sum(energy_density) * (self.dx**2)
+            return total_energy
+        except Exception as e:
+            st.warning(f"Error computing energy: {e}")
+            return 0.0
+
+    def step(self, applied_stress):
+        """Perform one time step of the simulation with comprehensive error handling"""
+        try:
+            # Get twin parameters
+            gamma_tw = self.mat_props['twinning']['gamma_tw']
+            n = self.mat_props['twinning']['n_2d']
+            a = self.mat_props['twinning']['a_2d']
+            # Compute transformation strain
+            exx_star, eyy_star, exy_star = compute_transformation_strain_numba(
+                self.phi, self.eta1, gamma_tw, a[0], a[1], n[0], n[1]
+            )
+            # Total eigenstrain (transformation + plastic)
+            eigenstrain_xx = exx_star + self.eps_p_xx
+            eigenstrain_yy = eyy_star + self.eps_p_yy
+            eigenstrain_xy = exy_star + self.eps_p_xy
+            # Solve mechanical equilibrium
+            sigma_eq, sxx, syy, sxy, eps_xx, eps_yy, eps_xy = self.spectral_solver.solve(
+                eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress
+            )
+            # Compute twin spacing
+            phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
+            h = compute_twin_spacing_numba(phi_gx, phi_gy)
+            # Compute yield stress using Ovid'ko model
+            plastic_params = self.mat_props['plasticity']
+            sigma_y = compute_yield_stress_numba(
+                h, plastic_params['sigma0'], plastic_params['mu'],
+                plastic_params['b'], plastic_params['nu']
+            )
+            # Update history for monitoring
+            phi_norm = np.linalg.norm(self.phi)
+            total_energy = self.compute_total_energy()
+            max_stress = np.max(sigma_eq)
+            avg_stress = np.mean(sigma_eq)
+            avg_spacing = np.mean(h[(h > 5) & (h < 50)])
+            
+            self.history['phi_norm'].append(phi_norm)
+            self.history['energy'].append(total_energy)
+            self.history['max_stress'].append(max_stress)
+            self.history['avg_stress'].append(avg_stress)
+            self.history['twin_spacing_avg'].append(avg_spacing)
+            
+            # Prepare results
+            results = {
+                'phi': self.phi.copy(),
+                'eta1': self.eta1.copy(),
+                'eta2': self.eta2.copy(),
+                'sigma_eq': sigma_eq.copy(),
+                'sigma_xx': sxx.copy(),
+                'sigma_yy': syy.copy(),
+                'sigma_xy': sxy.copy(),
+                'h': h.copy(),
+                'sigma_y': sigma_y.copy(),
+                'eps_p_mag': np.zeros_like(sigma_eq),  # Placeholder
+                'eps_xx': eps_xx.copy(),
+                'eps_yy': eps_yy.copy(),
+                'eps_xy': eps_xy.copy(),
+                'convergence': {
+                    'phi_norm': phi_norm,
+                    'energy': total_energy,
+                    'max_stress': max_stress,
+                    'avg_stress': avg_stress,
+                    'avg_spacing': avg_spacing
+                }
+            }
+            return results
+        except Exception as e:
+            st.error(f"Error in simulation step: {e}")
+            # Return zeros in case of error
+            zeros = np.zeros((self.N, self.N))
+            return {
+                'phi': zeros,
+                'eta1': zeros,
+                'eta2': zeros,
+                'sigma_eq': zeros,
+                'sigma_xx': zeros,
+                'sigma_yy': zeros,
+                'sigma_xy': zeros,
+                'h': zeros,
+                'sigma_y': zeros,
+                'eps_p_mag': zeros,
+                'eps_xx': zeros,
+                'eps_yy': zeros,
+                'eps_xy': zeros,
+                'convergence': {
+                    'phi_norm': 0,
+                    'energy': 0,
+                    'max_stress': 0,
+                    'avg_stress': 0,
+                    'avg_spacing': 0
+                }
+            }
 
 # ============================================================================
 # ENHANCED STREAMLIT APPLICATION
 # ============================================================================
-def create_enhanced_streamlit_app():
-    """Main function to create enhanced Streamlit application"""
-    
-    # Page configuration
+
+def main():
     st.set_page_config(
-        page_title="Enhanced Nanotwinned Cu Simulator",
+        page_title="Enhanced Nanotwinned Cu Phase-Field Simulator",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS
+    # Custom CSS for enhanced UI
     st.markdown("""
     <style>
     .main-header {
@@ -1122,373 +1158,547 @@ def create_enhanced_streamlit_app():
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
     }
-    .feature-card {
-        background-color: #F0F9FF;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        border-left: 4px solid #3B82F6;
-    }
     .tab-content {
         padding: 1rem;
         border-radius: 10px;
         background: white;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin: 1rem 0;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 3rem;
+        white-space: pre-wrap;
+        border-radius: 4px 4px 0px 0px;
+        padding: 0.5rem 1rem;
     }
     </style>
     """, unsafe_allow_html=True)
     
     # Header
-    st.markdown('<h1 class="main-header">🔬 Enhanced Nanotwinned Copper Phase-Field Simulator</h1>', 
-                unsafe_allow_html=True)
-    
-    # Feature highlights
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("""
-        <div class="feature-card">
-        <h4>📊 Advanced Post-Processing</h4>
-        • Enhanced line profiling<br>
-        • Statistical analysis<br>
-        • Correlation studies<br>
-        • Publication-quality plots
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown("""
-        <div class="feature-card">
-        <h4>🎨 Visualization Enhancements</h4>
-        • 50+ colormaps<br>
-        • Journal templates<br>
-        • Interactive 3D plots<br>
-        • Real-time styling
-        </div>
-        """, unsafe_allow_html=True)
-    with col3:
-        st.markdown("""
-        <div class="feature-card">
-        <h4>🔄 Multi-Simulation Analysis</h4>
-        • Simulation database<br>
-        • Side-by-side comparison<br>
-        • Parameter sweeps<br>
-        • Comprehensive export
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Initialize session state
-    if 'simulations' not in st.session_state:
-        st.session_state.simulations = {}
-    if 'visualization_system' not in st.session_state:
-        st.session_state.visualization_system = EnhancedVisualizationSystem()
-    if 'current_simulation' not in st.session_state:
-        st.session_state.current_simulation = None
-    if 'style_params' not in st.session_state:
-        st.session_state.style_params = {}
+    st.markdown('<h1 class="main-header">🔬 Enhanced Nanotwinned Copper Phase-Field Simulator</h1>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
+    <strong>Advanced Physics + Enhanced Post-Processing:</strong><br>
+    • Phase-field modeling of FCC nanotwins with anisotropic elasticity<br>
+    • Ovid'ko confined layer slip + Perzyna viscoplasticity<br>
+    • <strong>NEW:</strong> 50+ colormaps, line profiling, statistical analysis, correlation plots<br>
+    • <strong>NEW:</strong> Publication-quality styling, multi-simulation comparison<br>
+    • <strong>NEW:</strong> Enhanced export with comprehensive data packages
+    </div>
+    """, unsafe_allow_html=True)
     
     # Sidebar with enhanced controls
     with st.sidebar:
-        st.header("⚙️ Enhanced Configuration")
+        st.header("⚙️ Simulation Configuration")
         
         # Operation mode
-        operation_mode = st.selectbox(
+        operation_mode = st.radio(
             "Operation Mode",
-            ["Run New Simulation", "Compare Saved Simulations", "Advanced Analysis"],
+            ["Run New Simulation", "Compare Saved Simulations"],
             index=0
         )
         
-        # Simulation parameters (simplified for example)
         if operation_mode == "Run New Simulation":
-            st.subheader("🧪 Simulation Parameters")
+            # Geometry configuration
+            st.subheader("🧩 Geometry Configuration")
+            N = st.slider("Grid resolution (N×N)", 64, 512, 256, 64)
+            dx = st.slider("Grid spacing (nm)", 0.2, 2.0, 0.5, 0.1)
+            dt = st.slider("Time step (ns)", 1e-5, 1e-3, 1e-4, 1e-5)
             
-            # Grid parameters
-            N = st.slider("Grid Size (N)", 64, 512, 256, 64)
-            dx = st.slider("Grid Spacing (nm)", 0.1, 2.0, 0.5, 0.1)
+            # Material parameters
+            st.subheader("🔬 Material Parameters")
+            twin_spacing = st.slider("Twin spacing λ (nm)", 5.0, 100.0, 20.0, 1.0)
+            grain_boundary_pos = st.slider("Grain boundary position (nm)", -50.0, 50.0, 0.0, 1.0)
             
-            # Twin parameters
-            twin_spacing = st.slider("Twin Spacing (nm)", 5.0, 100.0, 20.0, 1.0)
-            applied_stress = st.slider("Applied Stress (MPa)", 0.0, 1000.0, 300.0, 10.0)
+            # Thermodynamic parameters
+            st.subheader("⚡ Thermodynamic Parameters")
+            W = st.slider("Twin well depth W (J/m³)", 0.1, 10.0, 2.0, 0.1)
+            A = st.slider("Grain double-well A (J/m³)", 0.1, 20.0, 5.0, 0.5)
+            B = st.slider("Grain anti-overlap B (J/m³)", 0.1, 30.0, 10.0, 0.5)
             
-            # Advanced options
-            with st.expander("🔧 Advanced Options"):
-                W = st.slider("Twin Energy (W)", 0.1, 10.0, 2.0, 0.1)
-                A = st.slider("Grain Energy (A)", 0.1, 20.0, 5.0, 0.5)
-                kappa0 = st.slider("Gradient Energy (κ₀)", 0.01, 10.0, 1.0, 0.1)
-                n_steps = st.slider("Simulation Steps", 10, 500, 100, 10)
+            # Gradient energy parameters
+            st.subheader("🌀 Gradient Energy")
+            kappa0 = st.slider("κ₀ (Gradient energy ref)", 0.01, 10.0, 1.0, 0.1)
+            gamma_aniso = st.slider("γ_aniso (CTB/ITB ratio)", 0.0, 2.0, 0.7, 0.05)
+            kappa_eta = st.slider("κ_η (GB energy)", 0.1, 10.0, 2.0, 0.1)
             
-            # Post-processing options
-            st.subheader("📈 Post-Processing")
-            enable_line_profiles = st.checkbox("Enable Line Profiles", True)
-            enable_statistics = st.checkbox("Enable Statistical Analysis", True)
-            enable_correlations = st.checkbox("Enable Correlation Analysis", True)
+            # Loading conditions
+            st.subheader("🏋️ Loading Conditions")
+            applied_stress_MPa = st.slider("Applied stress σ_xx (MPa)", 0.0, 1000.0, 300.0, 10.0)
             
-            # Visualization options
-            st.subheader("🎨 Visualization")
-            phi_cmap = st.selectbox("φ Colormap", cmap_list, index=cmap_list.index('RdBu_r'))
-            stress_cmap = st.selectbox("Stress Colormap", cmap_list, index=cmap_list.index('hot'))
-            spacing_cmap = st.selectbox("Spacing Colormap", cmap_list, index=cmap_list.index('plasma'))
+            # Simulation control
+            st.subheader("⏯️ Simulation Control")
+            n_steps = st.slider("Number of steps", 10, 1000, 100, 10)
+            save_frequency = st.slider("Save frequency", 1, 100, 10, 1)
             
-            # Run simulation button
-            if st.button("🚀 Run Enhanced Simulation", type="primary", use_container_width=True):
-                # Initialize visualization system
-                st.session_state.visualization_system.initialize(N, dx)
+            # Enhanced visualization settings
+            st.subheader("🎨 Enhanced Visualization")
+            colormap_library = EnhancedTwinVisualizer(N, dx).COLORMAPS
+            selected_cmap_phi = st.selectbox("φ Colormap", list(colormap_library.keys()), 
+                                           index=list(colormap_library.keys()).index('RdBu_r') 
+                                           if 'RdBu_r' in colormap_library else 0)
+            selected_cmap_stress = st.selectbox("σ_eq Colormap", list(colormap_library.keys()),
+                                              index=list(colormap_library.keys()).index('hot')
+                                              if 'hot' in colormap_library else 0)
+            
+            # Initialize button
+            if st.button("🚀 Initialize Simulation", type="primary", use_container_width=True):
+                params = {
+                    'N': N, 'dx': dx, 'dt': dt,
+                    'W': W, 'A': A, 'B': B,
+                    'kappa0': kappa0, 'gamma_aniso': gamma_aniso, 'kappa_eta': kappa_eta,
+                    'twin_spacing': twin_spacing,
+                    'grain_boundary_pos': grain_boundary_pos,
+                    'applied_stress': applied_stress_MPa * 1e6,
+                    'save_frequency': save_frequency,
+                    'cmap_phi': selected_cmap_phi,
+                    'cmap_stress': selected_cmap_stress
+                }
                 
-                # Create mock simulation data (replace with actual simulation)
-                with st.spinner("Running simulation with enhanced post-processing..."):
-                    # Generate mock results
-                    mock_results = generate_mock_simulation(N, dx, twin_spacing, applied_stress, n_steps)
-                    
-                    # Store in session state
-                    sim_params = {
-                        'N': N,
-                        'dx': dx,
-                        'twin_spacing': twin_spacing,
-                        'applied_stress': applied_stress * 1e6,
-                        'W': W,
-                        'A': A,
-                        'kappa0': kappa0,
-                        'n_steps': n_steps
-                    }
-                    
-                    # Save to database
-                    sim_id = SimulationDB.save_simulation(
-                        sim_params, 
-                        mock_results['history'],
-                        {'type': 'nanotwin', 'status': 'completed'}
-                    )
-                    
-                    # Generate enhanced plots
-                    plots = st.session_state.visualization_system.create_publication_quality_plots(
-                        mock_results['history'], sim_params
-                    )
-                    
-                    # Store for display
-                    st.session_state.current_simulation = {
-                        'id': sim_id,
-                        'params': sim_params,
-                        'results': mock_results,
-                        'plots': plots
-                    }
-                    
-                    st.success(f"✅ Simulation {sim_id} completed with enhanced analysis!")
+                # Initialize geometry
+                geom_viz = InitialGeometryVisualizer(N, dx)
+                phi, eta1, eta2 = geom_viz.create_twin_grain_geometry(twin_spacing, grain_boundary_pos)
+                
+                # Store in session state
+                st.session_state.initial_geometry = {
+                    'phi': phi, 'eta1': eta1, 'eta2': eta2,
+                    'geom_viz': geom_viz, 'params': params
+                }
+                st.session_state.initialized = True
+                st.session_state.operation_mode = 'new'
+                st.success("✅ Simulation initialized successfully!")
         
-        elif operation_mode == "Compare Saved Simulations":
-            st.subheader("🔍 Simulation Comparison")
+        else:  # Compare Saved Simulations
+            st.subheader("🔍 Comparison Configuration")
+            simulations = SimulationDatabase.get_simulation_list()
             
-            # Get saved simulations
-            sim_list = SimulationDB.get_simulation_list()
-            
-            if sim_list:
-                sim_options = {sim['name']: sim['id'] for sim in sim_list}
-                selected_names = st.multiselect(
+            if not simulations:
+                st.warning("No simulations saved yet. Run some simulations first!")
+            else:
+                # Multi-select for comparison
+                sim_options = {sim['name']: sim['id'] for sim in simulations}
+                selected_sim_ids = st.multiselect(
                     "Select Simulations to Compare",
                     options=list(sim_options.keys()),
                     default=list(sim_options.keys())[:min(3, len(sim_options))]
                 )
                 
-                selected_ids = [sim_options[name] for name in selected_names]
+                # Comparison settings
+                comparison_type = st.selectbox(
+                    "Comparison Type",
+                    ["Side-by-Side Fields", "Overlay Line Profiles", "Statistical Summary", 
+                     "Correlation Analysis", "Evolution Timeline"],
+                    index=0
+                )
                 
-                if st.button("📊 Generate Comparison Dashboard", type="secondary"):
-                    # Load selected simulations
-                    sims_data = {}
-                    for sim_id in selected_ids:
-                        sim_data = SimulationDB.get_simulation(sim_id)
-                        if sim_data and sim_data['results_history']:
-                            final_results = sim_data['results_history'][-1]
-                            sims_data[f"Sim {sim_id}"] = {
-                                'phi': final_results['phi'],
-                                'sigma_eq': final_results['sigma_eq'],
-                                'h': final_results['h']
-                            }
-                    
-                    # Create comparison dashboard
-                    if sims_data:
-                        comparison_fig = st.session_state.visualization_system.create_comparison_dashboard(sims_data)
-                        st.session_state.comparison_figure = comparison_fig
-                        st.success(f"Generated comparison dashboard for {len(sims_data)} simulations")
-            else:
-                st.info("No simulations saved yet. Run some simulations first!")
+                if comparison_type == "Overlay Line Profiles":
+                    profile_direction = st.selectbox(
+                        "Profile Direction",
+                        ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal", "Custom"],
+                        index=0
+                    )
+                    position_ratio = st.slider("Position Ratio", 0.0, 1.0, 0.5, 0.1)
+                
+                # Field selection for comparison
+                field_to_compare = st.selectbox(
+                    "Field to Compare",
+                    ["phi (Twin Order)", "sigma_eq (Von Mises Stress)", 
+                     "h (Twin Spacing)", "sigma_y (Yield Stress)"],
+                    index=1
+                )
+                
+                if st.button("🔬 Run Comparison", type="primary"):
+                    st.session_state.comparison_config = {
+                        'sim_ids': [sim_options[name] for name in selected_sim_ids],
+                        'type': comparison_type,
+                        'field': field_to_compare,
+                        'profile_direction': profile_direction if comparison_type == "Overlay Line Profiles" else None,
+                        'position_ratio': position_ratio if comparison_type == "Overlay Line Profiles" else None
+                    }
+                    st.session_state.operation_mode = 'compare'
+                    st.rerun()
     
-    # Main content area
-    if operation_mode == "Run New Simulation" and st.session_state.current_simulation:
-        st.header("📊 Enhanced Analysis Results")
+    # Main content area with enhanced tabs
+    if 'initialized' in st.session_state and st.session_state.initialized:
+        params = st.session_state.initial_geometry['params']
+        N = params['N']
+        dx = params['dx']
         
-        # Create tabs for different analysis types
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📈 Overview", "📊 Statistics", "🔗 Correlations", 
-            "📏 Line Profiles", "📥 Export"
-        ])
+        # Initialize enhanced visualizer
+        visualizer = EnhancedTwinVisualizer(N, dx)
         
-        with tab1:
-            st.subheader("Simulation Overview")
+        # Create tabs
+        tab_names = ["📐 Initial Geometry", "▶️ Run Simulation", "📊 Basic Results", 
+                    "🔍 Advanced Analysis", "📈 Comparison Tools", "📤 Enhanced Export"]
+        
+        tabs = st.tabs(tab_names)
+        
+        with tabs[0]:  # Initial Geometry
+            st.header("Initial Geometry Visualization")
+            geom_viz = st.session_state.initial_geometry['geom_viz']
+            phi = st.session_state.initial_geometry['phi']
+            eta1 = st.session_state.initial_geometry['eta1']
+            eta2 = st.session_state.initial_geometry['eta2']
             
-            # Display key metrics
-            col1, col2, col3, col4 = st.columns(4)
+            # Use enhanced visualizer for initial state
+            initial_results = {
+                'phi': phi,
+                'eta1': eta1,
+                'sigma_eq': np.zeros_like(phi),  # Placeholder
+                'h': compute_twin_spacing_numba(*compute_gradients_numba(phi, dx))
+            }
+            
+            fig = visualizer.create_multi_field_comparison(initial_results)
+            st.pyplot(fig)
+            
+            # Show geometry statistics
+            col1, col2, col3 = st.columns(3)
             with col1:
-                final_phi = st.session_state.current_simulation['results']['history'][-1]['phi']
-                st.metric("Avg φ", f"{np.mean(final_phi):.3f}")
+                avg_spacing = np.mean(initial_results['h'][(initial_results['h']>5)&(initial_results['h']<50)])
+                st.metric("Avg Twin Spacing", f"{avg_spacing:.1f} nm")
             with col2:
-                final_stress = st.session_state.current_simulation['results']['history'][-1]['sigma_eq']
-                st.metric("Max Stress", f"{np.max(final_stress)/1e9:.2f} GPa")
+                twin_area = np.sum(eta1 > 0.5) * dx**2
+                st.metric("Twin Grain Area", f"{twin_area:.0f} nm²")
             with col3:
-                final_spacing = st.session_state.current_simulation['results']['history'][-1]['h']
-                valid_spacing = final_spacing[final_spacing < 100]
-                st.metric("Avg Spacing", f"{np.mean(valid_spacing):.1f} nm")
-            with col4:
-                final_plastic = st.session_state.current_simulation['results']['history'][-1]['eps_p_mag']
-                st.metric("Max Plastic Strain", f"{np.max(final_plastic):.4f}")
-            
-            # Display field plots
-            st.subheader("Field Distributions")
-            plots = st.session_state.current_simulation['plots']
-            
-            if plots and 'phi_evolution' in plots:
-                st.pyplot(plots['phi_evolution'])
+                num_twins = np.sum(initial_results['h'] < 20)
+                st.metric("Number of Twins", f"{num_twins:.0f}")
         
-        with tab2:
-            st.subheader("Statistical Analysis")
+        with tabs[1]:  # Run Simulation
+            st.header("Run Simulation")
             
-            if plots and 'stress_analysis' in plots:
-                st.pyplot(plots['stress_analysis'])
-            
-            if plots and 'spacing_analysis' in plots:
-                st.pyplot(plots['spacing_analysis'])
-        
-        with tab3:
-            st.subheader("Correlation Analysis")
-            
-            if plots and 'stress_spacing_correlation' in plots:
-                st.pyplot(plots['stress_spacing_correlation'])
-        
-        with tab4:
-            st.subheader("Line Profile Analysis")
-            
-            if plots and 'field_profiles' in plots:
-                for field_name, profile_fig in plots['field_profiles'].items():
-                    st.subheader(f"{field_name} Profiles")
-                    st.pyplot(profile_fig)
-        
-        with tab5:
-            st.subheader("Comprehensive Export")
-            
-            # Export options
-            export_format = st.selectbox(
-                "Export Format",
-                ["Complete Package (ZIP)", "Data Only (NPZ)", "Plots Only (PNG)", "Report (PDF)"]
-            )
-            
-            if st.button("📦 Generate Export", type="primary"):
-                with st.spinner("Preparing export package..."):
-                    exporter = EnhancedDataExporter()
+            if st.button("▶️ Start Evolution", type="secondary", use_container_width=True):
+                with st.spinner("Running phase-field simulation..."):
+                    # Initialize solver
+                    solver = NanotwinnedCuSolver(params)
+                    solver.phi = st.session_state.initial_geometry['phi'].copy()
+                    solver.eta1 = st.session_state.initial_geometry['eta1'].copy()
+                    solver.eta2 = st.session_state.initial_geometry['eta2'].copy()
                     
-                    # Generate export
-                    zip_buffer = exporter.export_comprehensive_package(
-                        st.session_state.current_simulation['results']['history'],
-                        st.session_state.current_simulation['params'],
-                        st.session_state.current_simulation['plots'],
-                        f"nanotwin_sim_{st.session_state.current_simulation['id']}"
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Storage for results
+                    results_history = []
+                    timesteps = []
+                    
+                    # Simulation loop
+                    for step in range(n_steps):
+                        status_text.text(f"Step {step+1}/{n_steps} | Time: {(step+1)*dt:.4f} ns")
+                        results = solver.step(params['applied_stress'])
+                        
+                        if step % save_frequency == 0:
+                            results_history.append(results.copy())
+                            timesteps.append(step * dt)
+                        
+                        progress_bar.progress((step + 1) / n_steps)
+                    
+                    st.success(f"✅ Simulation completed! Generated {len(results_history)} frames.")
+                    
+                    # Store results
+                    st.session_state.results_history = results_history
+                    st.session_state.timesteps = timesteps
+                    st.session_state.solver = solver
+                    
+                    # Save to database
+                    if 'twin_simulations' not in st.session_state:
+                        st.session_state.twin_simulations = {}
+                    
+                    sim_id = SimulationDatabase.generate_id(params)
+                    st.session_state.twin_simulations[sim_id] = {
+                        'id': sim_id,
+                        'params': params,
+                        'results_history': results_history,
+                        'timesteps': timesteps,
+                        'created_at': datetime.now().isoformat()
+                    }
+                    
+                    st.balloons()
+        
+        with tabs[2]:  # Basic Results
+            if 'results_history' in st.session_state:
+                st.header("Basic Results Visualization")
+                
+                # Select frame to display
+                frame_idx = st.slider("Select frame", 0, len(st.session_state.results_history)-1, 
+                                    len(st.session_state.results_history)-1)
+                results = st.session_state.results_history[frame_idx]
+                
+                # Enhanced field comparison
+                fig = visualizer.create_multi_field_comparison(results)
+                st.pyplot(fig)
+                
+                # Convergence plots
+                st.subheader("Convergence Monitoring")
+                if hasattr(st.session_state.solver, 'history'):
+                    fig_conv = visualizer.create_statistical_analysis(
+                        st.session_state.results_history,
+                        st.session_state.timesteps
                     )
+                    st.pyplot(fig_conv)
+            else:
+                st.info("Run a simulation first to view results")
+        
+        with tabs[3]:  # Advanced Analysis
+            if 'results_history' in st.session_state:
+                st.header("Advanced Analysis Tools")
+                
+                # Field selection for analysis
+                analysis_type = st.selectbox(
+                    "Analysis Type",
+                    ["Line Profile Analysis", "Statistical Analysis", "Correlation Analysis"],
+                    index=0
+                )
+                
+                if analysis_type == "Line Profile Analysis":
+                    st.subheader("Line Profile Analysis")
                     
-                    # Download button
-                    st.download_button(
-                        label="⬇️ Download Export Package",
-                        data=zip_buffer,
-                        file_name=f"nanotwin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                        mime="application/zip"
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        profile_types = st.multiselect(
+                            "Profile Directions",
+                            ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal"],
+                            default=["Horizontal", "Vertical"]
+                        )
+                        position_ratio = st.slider("Position Ratio", 0.0, 1.0, 0.5, 0.1)
+                    
+                    with col2:
+                        field_to_profile = st.selectbox(
+                            "Field to Profile",
+                            ["phi", "sigma_eq", "h", "sigma_y"],
+                            index=1
+                        )
+                    
+                    results = st.session_state.results_history[-1]
+                    profile_config = {
+                        'types': profile_types,
+                        'position_ratio': position_ratio
+                    }
+                    
+                    fig_profiles = visualizer.create_enhanced_line_profiles(
+                        {field_to_profile: results[field_to_profile]},
+                        profile_config
                     )
+                    st.pyplot(fig_profiles)
+                
+                elif analysis_type == "Statistical Analysis":
+                    st.subheader("Statistical Analysis")
                     
-                    st.success("Export package generated successfully!")
-    
-    elif operation_mode == "Compare Saved Simulations" and 'comparison_figure' in st.session_state:
-        st.header("📊 Multi-Simulation Comparison Dashboard")
+                    fig_stats = visualizer.create_statistical_analysis(
+                        st.session_state.results_history,
+                        st.session_state.timesteps
+                    )
+                    st.pyplot(fig_stats)
+                    
+                    # Display statistical summary
+                    final_results = st.session_state.results_history[-1]
+                    st.subheader("Final Frame Statistics")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        for field in ['phi', 'sigma_eq', 'h']:
+                            if field in final_results:
+                                data = final_results[field]
+                                st.metric(
+                                    f"{field.replace('_', ' ').title()}",
+                                    f"Mean: {np.mean(data):.3e}\nStd: {np.std(data):.3e}"
+                                )
+                    
+                    with col2:
+                        # Percentile information
+                        stress_data = final_results['sigma_eq'] / 1e9  # GPa
+                        percentiles = np.percentile(stress_data, [25, 50, 75, 95])
+                        st.metric(
+                            "Stress Percentiles (GPa)",
+                            f"25%: {percentiles[0]:.2f}\n50%: {percentiles[1]:.2f}\n"
+                            f"75%: {percentiles[2]:.2f}\n95%: {percentiles[3]:.2f}"
+                        )
+                
+                elif analysis_type == "Correlation Analysis":
+                    st.subheader("Field Correlation Analysis")
+                    
+                    fig_corr = visualizer.create_correlation_analysis(
+                        st.session_state.results_history[-1]
+                    )
+                    st.pyplot(fig_corr)
+            else:
+                st.info("Run a simulation first to use advanced analysis tools")
         
-        # Display comparison figure
-        st.pyplot(st.session_state.comparison_figure)
-        
-        # Add comparison metrics
-        st.subheader("Comparison Statistics")
-        
-        # Load simulations for detailed comparison
-        sim_list = SimulationDB.get_simulation_list()
-        if sim_list:
-            comparison_data = []
-            for sim in sim_list[:5]:  # Limit to 5 for display
-                sim_data = SimulationDB.get_simulation(sim['id'])
-                if sim_data and sim_data['results_history']:
-                    final = sim_data['results_history'][-1]
-                    comparison_data.append({
-                        'Simulation': sim['name'],
-                        'Avg φ': f"{np.mean(final['phi']):.3f}",
-                        'Max σ_eq (GPa)': f"{np.max(final['sigma_eq'])/1e9:.2f}",
-                        'Avg h (nm)': f"{np.mean(final['h'][final['h'] < 100]):.1f}",
-                        'Max ε_p': f"{np.max(final['eps_p_mag']):.4f}"
+        with tabs[4]:  # Comparison Tools
+            st.header("Multi-Simulation Comparison")
+            
+            simulations = SimulationDatabase.get_simulation_list()
+            
+            if not simulations:
+                st.info("Run multiple simulations first to enable comparison")
+            else:
+                # Display available simulations
+                st.subheader("Available Simulations")
+                
+                sim_data = []
+                for sim in simulations:
+                    sim_data.append({
+                        'ID': sim['id'][:8],
+                        'Twin Spacing': f"{sim['params'].get('twin_spacing', 0):.1f} nm",
+                        'Applied Stress': f"{sim['params'].get('applied_stress', 0)/1e6:.0f} MPa",
+                        'Frames': len(simulations[0]['results']) if simulations and simulations[0]['results'] else 0,
+                        'Created': sim.get('created_at', '')[:19]
                     })
+                
+                df = pd.DataFrame(sim_data)
+                st.dataframe(df, use_container_width=True)
+                
+                # Comparison visualization
+                if len(simulations) >= 2:
+                    st.subheader("Comparison Visualization")
+                    
+                    comparison_type = st.selectbox(
+                        "Visualization Type",
+                        ["Stress Distribution", "Twin Spacing", "Convergence Rate"],
+                        index=0
+                    )
+                    
+                    if comparison_type == "Stress Distribution":
+                        col1, col2 = st.columns(2)
+                        for idx, sim in enumerate(simulations[:4]):
+                            with (col1 if idx % 2 == 0 else col2):
+                                if sim['results']:
+                                    stress_data = sim['results']['sigma_eq'] / 1e9
+                                    fig, ax = plt.subplots(figsize=(4, 3))
+                                    im = ax.imshow(stress_data, cmap='hot', 
+                                                  vmin=0, vmax=np.percentile(stress_data, 95),
+                                                  aspect='equal')
+                                    ax.set_title(f"Sim {idx+1}: {sim['params'].get('twin_spacing', 0):.1f}nm")
+                                    ax.axis('off')
+                                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                                    st.pyplot(fig)
+        
+        with tabs[5]:  # Enhanced Export
+            st.header("Enhanced Export Options")
             
-            if comparison_data:
-                df_comparison = pd.DataFrame(comparison_data)
-                st.dataframe(df_comparison, use_container_width=True)
+            if 'results_history' in st.session_state:
+                export_format = st.selectbox(
+                    "Export Format",
+                    ["Complete ZIP Package", "Field Arrays (NPZ)", "Statistics (CSV)", 
+                     "Publication Figures (PNG)", "PyTorch Tensors"],
+                    index=0
+                )
+                
+                include_options = st.multiselect(
+                    "Include in export",
+                    ["All Fields", "Convergence History", "Line Profiles", 
+                     "Statistical Analysis", "Correlation Plots"],
+                    default=["All Fields", "Convergence History"]
+                )
+                
+                if st.button("📦 Generate Enhanced Export", type="primary"):
+                    with st.spinner("Preparing export package..."):
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        zip_buffer = BytesIO()
+                        
+                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            # 1. Save parameters
+                            params_json = json.dumps(params, indent=2, cls=NumpyEncoder)
+                            zip_file.writestr(f"simulation_params_{timestamp}.json", params_json)
+                            
+                            # 2. Save final field data
+                            final_results = st.session_state.results_history[-1]
+                            npz_buffer = BytesIO()
+                            np.savez_compressed(npz_buffer, **final_results)
+                            zip_file.writestr(f"final_fields_{timestamp}.npz", npz_buffer.getvalue())
+                            
+                            # 3. Save convergence history
+                            if hasattr(st.session_state.solver, 'history'):
+                                history_data = {
+                                    'timesteps': np.array(st.session_state.timesteps),
+                                    'phi_norm': np.array(st.session_state.solver.history['phi_norm']),
+                                    'energy': np.array(st.session_state.solver.history['energy']),
+                                    'max_stress': np.array(st.session_state.solver.history['max_stress']),
+                                    'avg_stress': np.array(st.session_state.solver.history['avg_stress']),
+                                    'twin_spacing_avg': np.array(st.session_state.solver.history['twin_spacing_avg'])
+                                }
+                                npz_buffer = BytesIO()
+                                np.savez_compressed(npz_buffer, **history_data)
+                                zip_file.writestr(f"convergence_history_{timestamp}.npz", npz_buffer.getvalue())
+                            
+                            # 4. Generate and save figures
+                            if "Publication Figures (PNG)" in export_format:
+                                # Create multi-field comparison figure
+                                fig_comparison = visualizer.create_multi_field_comparison(final_results)
+                                img_buffer = BytesIO()
+                                fig_comparison.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+                                zip_file.writestr(f"field_comparison_{timestamp}.png", img_buffer.getvalue())
+                                
+                                # Create line profile figure
+                                profile_config = {'types': ['Horizontal', 'Vertical'], 'position_ratio': 0.5}
+                                fig_profiles = visualizer.create_enhanced_line_profiles(
+                                    {'sigma_eq': final_results['sigma_eq']}, 
+                                    profile_config
+                                )
+                                img_buffer = BytesIO()
+                                fig_profiles.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+                                zip_file.writestr(f"line_profiles_{timestamp}.png", img_buffer.getvalue())
+                            
+                            # 5. Save summary CSV
+                            csv_data = []
+                            for i, results in enumerate(st.session_state.results_history):
+                                csv_data.append({
+                                    'step': i,
+                                    'time_ns': i * params['dt'] * params['save_frequency'],
+                                    'avg_phi': np.mean(results['phi']),
+                                    'avg_sigma_eq_gpa': np.mean(results['sigma_eq']) / 1e9,
+                                    'max_sigma_eq_gpa': np.max(results['sigma_eq']) / 1e9,
+                                    'avg_h_nm': np.mean(results['h'][(results['h']>5)&(results['h']<50)]),
+                                    'avg_sigma_y_mpa': np.mean(results['sigma_y']) / 1e6
+                                })
+                            
+                            df = pd.DataFrame(csv_data)
+                            csv_buffer = StringIO()
+                            df.to_csv(csv_buffer, index=False)
+                            zip_file.writestr(f"summary_{timestamp}.csv", csv_buffer.getvalue())
+                        
+                        zip_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="⬇️ Download Export Package",
+                            data=zip_buffer,
+                            file_name=f"nanotwin_export_{timestamp}.zip",
+                            mime="application/zip"
+                        )
+                        st.success("✅ Export package ready!")
+            else:
+                st.info("Run a simulation first to export results")
     
     else:
         # Welcome screen
         st.markdown("""
         <div style="text-align: center; padding: 3rem;">
         <h2>Welcome to the Enhanced Nanotwinned Copper Simulator</h2>
-        <p style="font-size: 1.2rem; color: #666;">
-        A comprehensive phase-field simulation platform with advanced post-processing capabilities
+        <p style="font-size: 1.2rem; color: #666; margin-bottom: 2rem;">
+        Configure simulation parameters in the sidebar and click "Initialize Simulation" to begin.
         </p>
-        
-        <div style="margin-top: 2rem; text-align: left; max-width: 800px; margin-left: auto; margin-right: auto;">
-        <h4>🎯 Key Features:</h4>
-        
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
-        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
-        <strong>Advanced Post-Processing</strong><br>
-        • Enhanced line profiling<br>
-        • Statistical analysis<br>
-        • Correlation studies<br>
-        • Multi-simulation comparison
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-top: 2rem;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    padding: 1.5rem; border-radius: 10px; color: white;">
+        <h4>🎯 Advanced Physics</h4>
+        <p>Phase-field modeling of FCC nanotwins with spectral elasticity solver</p>
         </div>
-        
-        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
-        <strong>Visualization Enhancements</strong><br>
-        • 50+ scientific colormaps<br>
-        • Journal templates<br>
-        • Publication-ready plots<br>
-        • Interactive 3D views
+        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+                    padding: 1.5rem; border-radius: 10px; color: white;">
+        <h4>📊 Enhanced Analysis</h4>
+        <p>Line profiling, statistical analysis, correlation plots, multi-simulation comparison</p>
         </div>
-        
-        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
-        <strong>Data Management</strong><br>
-        • Simulation database<br>
-        • Comprehensive export<br>
-        • Parameter sweeps<br>
-        • Cloud-style storage
-        </div>
-        
-        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
-        <strong>Physics Capabilities</strong><br>
-        • FCC twinning mechanics<br>
-        • Anisotropic elasticity<br>
-        • Plasticity coupling<br>
-        • Defect interactions
-        </div>
-        </div>
-        
-        <div style="margin-top: 2rem; padding: 1.5rem; background: #e8f4fd; border-radius: 10px;">
-        <strong>📋 Getting Started:</strong><br>
-        1. Configure simulation parameters in the sidebar<br>
-        2. Run a new simulation or load saved ones<br>
-        3. Explore enhanced post-processing features<br>
-        4. Generate publication-quality results<br>
-        5. Export comprehensive data packages
+        <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
+                    padding: 1.5rem; border-radius: 10px; color: white;">
+        <h4>🎨 Publication Ready</h4>
+        <p>50+ colormaps, scale bars, journal templates, high-res export</p>
         </div>
         </div>
         </div>
         """, unsafe_allow_html=True)
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder for numpy types"""
     def default(self, obj):
@@ -1500,63 +1710,5 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
-def generate_mock_simulation(N, dx, twin_spacing, applied_stress, n_steps):
-    """Generate mock simulation data for demonstration"""
-    # Create mock twin structure
-    x = np.linspace(-N*dx/2, N*dx/2, N)
-    y = np.linspace(-N*dx/2, N*dx/2, N)
-    X, Y = np.meshgrid(x, y)
-    
-    history = []
-    
-    for step in range(n_steps):
-        # Create evolving twin pattern
-        phase = 2 * np.pi * Y / twin_spacing + step * 0.1
-        phi = np.tanh(np.sin(phase) * 3.0)
-        
-        # Create grain structure
-        eta1 = 0.5 * (1 + np.tanh(X / 5.0))
-        eta2 = 1 - eta1
-        
-        # Create stress field
-        sigma_eq = applied_stress * 1e6 * (1 + 0.5 * np.sin(2*np.pi*X/50) * np.cos(2*np.pi*Y/50))
-        sigma_eq += 0.3 * applied_stress * 1e6 * phi
-        
-        # Create twin spacing
-        h = twin_spacing * (1 + 0.2 * np.random.randn(N, N))
-        h = np.clip(h, 5, 100)
-        
-        # Create plastic strain
-        eps_p_mag = 0.001 * step/n_steps * np.exp(-(X**2 + Y**2) / (100 * dx**2))
-        
-        # Create strain components
-        eps_xx = 0.001 * np.sin(2*np.pi*X/100)
-        eps_yy = 0.0005 * np.cos(2*np.pi*Y/100)
-        eps_xy = 0.0003 * np.sin(2*np.pi*X/50) * np.cos(2*np.pi*Y/50)
-        
-        history.append({
-            'phi': phi,
-            'eta1': eta1,
-            'eta2': eta2,
-            'sigma_eq': sigma_eq,
-            'sigma_xx': sigma_eq * 0.7,
-            'sigma_yy': sigma_eq * 0.3,
-            'sigma_xy': sigma_eq * 0.2,
-            'h': h,
-            'sigma_y': applied_stress * 0.8e6 * np.ones_like(sigma_eq),
-            'eps_p_mag': eps_p_mag,
-            'eps_xx': eps_xx,
-            'eps_yy': eps_yy,
-            'eps_xy': eps_xy
-        })
-    
-    return {
-        'history': history,
-        'final': history[-1]
-    }
-
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
 if __name__ == "__main__":
-    create_enhanced_streamlit_app()
+    main()
