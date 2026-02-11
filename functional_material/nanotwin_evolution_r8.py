@@ -1116,8 +1116,19 @@ class EnhancedTwinVisualizer:
                           data, levels=[0], colors='white', linewidths=1, alpha=0.8)
            
             ax.set_title(title, fontsize=style_params.get('title_font_size', 10))
-            ax.set_xlabel('x (nm)', fontsize=style_params.get('label_font_size', 8))
-            ax.set_ylabel('y (nm)', fontsize=style_params.get('label_font_size', 8))
+            # BEFORE (vulnerable to TypeError):
+            #ax.set_xlabel('x (nm)', fontsize=style_params.get('label_font_size', 8))
+            #ax.set_ylabel('y (nm)', fontsize=style_params.get('label_font_size', 8))
+            
+            # AFTER (robust fix):
+            label_font_size = style_params.get('label_font_size', 8)
+            try:
+                label_font_size = float(label_font_size)  # Ensure numeric type
+            except (TypeError, ValueError):
+                label_font_size = 8.0  # Fallback to safe default
+            
+            ax.set_xlabel('x (nm)', fontsize=label_font_size)
+            ax.set_ylabel('y (nm)', fontsize=label_font_size)
            
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             if field_name == 'sigma_eq':
