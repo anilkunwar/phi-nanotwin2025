@@ -454,7 +454,7 @@ class EnhancedLineProfiler:
                
                 if 0 <= x < nx-1 and 0 <= y < ny-1:
                     x0, y0 = int(x), int(y)
-                    x1, y1 = x0 + 1, y0 + 1
+                    x1, y1 = x0 + 1, y1 + 1
                    
                     if x1 >= nx: x1 = nx - 1
                     if y1 >= ny: y1 = ny - 1
@@ -725,7 +725,7 @@ def build_sim_name(params: dict, sim_id: str = None) -> str:
         return f"twin_simulation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 # ============================================================================
-# NUMBA-COMPATIBLE FUNCTIONS (with physically realistic clipping)
+# NUMBA-COMPATIBLE FUNCTIONS (with plastic strain clipping to prevent blow-up)
 # ============================================================================
 @njit(parallel=True)
 def compute_gradients_numba(field, dx):
@@ -790,9 +790,6 @@ def compute_anisotropic_properties_numba(phi_gx, phi_gy, nx, ny, kappa0, gamma_a
                 L_phi[i, j] = L_CTB
     return kappa_phi, L_phi
 
-# ============================================================================
-# PHYSICAL FIX: Transformation strain scales smoothly with eta1 (no hard threshold)
-# ============================================================================
 @njit(parallel=True)
 def compute_transformation_strain_numba(phi, eta1, gamma_tw, ax, ay, nx, ny):
     N = phi.shape[0]
@@ -801,13 +798,12 @@ def compute_transformation_strain_numba(phi, eta1, gamma_tw, ax, ay, nx, ny):
     exy_star = np.zeros((N, N))
     for i in prange(N):
         for j in prange(N):
-            # Smooth interpolation: no if condition, amplitude = eta1 * f_phi
-            f_phi = 0.25 * (phi[i, j]**3 - phi[i, j]**2 - phi[i, j] + 1)
-            # Clamp eta1 between 0 and 1 for numerical safety
-            eta1_clamped = min(max(eta1[i, j], 0.0), 1.0)
-            exx_star[i, j] = gamma_tw * nx * ax * f_phi * eta1_clamped
-            eyy_star[i, j] = gamma_tw * ny * ay * f_phi * eta1_clamped
-            exy_star[i, j] = 0.5 * gamma_tw * (nx * ay + ny * ax) * f_phi * eta1_clamped
+            if eta1[i, j] > 0.5:
+                phi_val = phi[i, j]
+                f_phi = 0.25 * (phi_val**3 - phi_val**2 - phi_val + 1)
+                exx_star[i, j] = gamma_tw * nx * ax * f_phi
+                eyy_star[i, j] = gamma_tw * ny * ay * f_phi
+                exy_star[i, j] = 0.5 * gamma_tw * (nx * ay + ny * ax) * f_phi
     return exx_star, eyy_star, exy_star
 
 @njit(parallel=True)
@@ -832,17 +828,18 @@ def compute_plastic_strain_numba(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy
     eps_p_xx_new = np.zeros((N, N))
     eps_p_yy_new = np.zeros((N, N))
     eps_p_xy_new = np.zeros((N, N))
-    MAX_OVERSTRESS = 3.0   # Reduced from 5.0 for better numerical stability
-    MAX_PLASTIC_STRAIN = 1.0  # Physically, plastic strain >1 is unrealistic for this system
+    MAX_OVERSTRESS = 5.0   # Clipping to prevent numerical blow-up
     for i in prange(N):
         for j in prange(N):
             if sigma_eq[i, j] > sigma_y[i, j]:
                 overstress = (sigma_eq[i, j] - sigma_y[i, j]) / sigma_y[i, j]
+                # Clip overstress to a realistic maximum
                 overstress = min(max(overstress, 0.0), MAX_OVERSTRESS)
                 gamma_dot = gamma0_dot * overstress**m
                 stress_dev = 2/3 * gamma_dot * dt
-                # Cap the increment to avoid runaway
-                stress_dev = min(stress_dev, 0.05)
+                # Limit the increment to avoid runaway (optional, but safe)
+                if stress_dev > 0.1:
+                    stress_dev = 0.1
                 eps_p_xx_new[i, j] = eps_p_xx[i, j] + stress_dev
                 eps_p_yy_new[i, j] = eps_p_yy[i, j] - 0.5 * stress_dev
                 eps_p_xy_new[i, j] = eps_p_xy[i, j] + 0.5 * stress_dev
@@ -850,12 +847,6 @@ def compute_plastic_strain_numba(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy
                 eps_p_xx_new[i, j] = eps_p_xx[i, j]
                 eps_p_yy_new[i, j] = eps_p_yy[i, j]
                 eps_p_xy_new[i, j] = eps_p_xy[i, j]
-    # Clip total plastic strain to physically meaningful range
-    for i in prange(N):
-        for j in prange(N):
-            eps_p_xx_new[i, j] = min(max(eps_p_xx_new[i, j], -MAX_PLASTIC_STRAIN), MAX_PLASTIC_STRAIN)
-            eps_p_yy_new[i, j] = min(max(eps_p_yy_new[i, j], -MAX_PLASTIC_STRAIN), MAX_PLASTIC_STRAIN)
-            eps_p_xy_new[i, j] = min(max(eps_p_xy_new[i, j], -MAX_PLASTIC_STRAIN), MAX_PLASTIC_STRAIN)
     return eps_p_xx_new, eps_p_yy_new, eps_p_xy_new
 
 # ============================================================================
@@ -907,8 +898,18 @@ class MaterialProperties:
             warnings.append("Applied stress > 2GPa may cause unrealistic deformation")
         return errors, warnings
 
+# ============================================================================
+# PHYSICALLY CONSISTENT INITIAL GEOMETRY VISUALIZER (CORRECTED)
+# ============================================================================
 class InitialGeometryVisualizer:
-    """Class to create and visualize initial geometric conditions"""
+    """
+    Class to create and visualize initial geometric conditions with 
+    PHYSICALLY CONSISTENT boundary conditions. 
+    
+    Key Fix: φ amplitude is modulated by η₁ to respect the free energy coupling
+    term W(φ²-1)²η₁². This ensures twin boundaries terminate cleanly at grain 
+    boundaries and eliminates unphysical φ=0 contour protrusions.
+    """
     def __init__(self, N, dx):
         self.N = N
         self.dx = dx
@@ -917,57 +918,135 @@ class InitialGeometryVisualizer:
         self.X, self.Y = np.meshgrid(self.x, self.y)
 
     @handle_errors
-    def create_twin_grain_geometry(self, twin_spacing=20.0, grain_boundary_pos=0.0, gb_width=3.0):
+    def create_twin_grain_geometry(self, twin_spacing=20.0, grain_boundary_pos=0.0, 
+                                   gb_width=3.0, smooth_transition=False):
+        """
+        Create PHYSICALLY CONSISTENT initial geometry where twin boundaries 
+        terminate at grain boundaries.
+        
+        PHYSICS PRINCIPLE: The free energy coupling term W(φ²-1)²η₁² requires φ → 0 
+        as η₁ → 0. This implementation enforces φ ∝ η₁ to ensure thermodynamic 
+        consistency.
+        
+        Parameters
+        ----------
+        twin_spacing : float
+            Initial twin boundary spacing (nm)
+        grain_boundary_pos : float
+            X-position of grain boundary center (nm)
+        gb_width : float
+            Width of grain boundary transition zone (nm)
+        smooth_transition : bool, optional
+            Apply additional Gaussian smoothing to the amplitude profile 
+            to improve numerical stability (default False)
+            
+        Returns
+        -------
+        phi : ndarray (N,N)
+            Twin order parameter with AMPLITUDE MODULATION by η₁
+        eta1 : ndarray (N,N)
+            Twin grain order parameter
+        eta2 : ndarray (N,N)
+            Adjacent grain order parameter
+        """
         eta1 = np.zeros((self.N, self.N))
         eta2 = np.zeros((self.N, self.N))
         phi = np.zeros((self.N, self.N))
         
-        # Step 1: Create grain fields with smooth transition
+        # STEP 1: Create grain fields with smooth hyperbolic tangent transition
+        # This ensures C¹ continuity for numerical stability
         for i in range(self.N):
             for j in range(self.N):
                 x_val = self.X[i, j]
                 dist_from_gb = x_val - grain_boundary_pos
+                
                 if dist_from_gb < -gb_width:
+                    # Pure twin grain region
                     eta1[i, j] = 1.0
                     eta2[i, j] = 0.0
                 elif dist_from_gb > gb_width:
+                    # Pure adjacent grain region
                     eta1[i, j] = 0.0
                     eta2[i, j] = 1.0
                 else:
-                    transition = 0.5 * (1 - np.tanh(dist_from_gb / (gb_width/3)))
+                    # Smooth transition zone using tanh for C¹ continuity
+                    # Width scaling factor (gb_width/3) controls transition sharpness
+                    transition = 0.5 * (1 - np.tanh(dist_from_gb / (gb_width / 3.0)))
                     eta1[i, j] = transition
-                    eta2[i, j] = 1 - transition
+                    eta2[i, j] = 1.0 - transition
         
-        # Step 2: Create twin field WITH PHYSICAL AMPLITUDE MODULATION (NO THRESHOLD)
+        # STEP 2: Create twin field WITH PHYSICAL AMPLITUDE SUPPRESSION
+        # CRITICAL FIX: φ amplitude MUST be modulated by η₁ to respect 
+        # the W(φ²-1)²η₁² coupling term.
         for i in range(self.N):
             for j in range(self.N):
-                # Always compute the twin pattern; amplitude is strictly proportional to eta1
-                phase = 2 * np.pi * self.Y[i, j] / twin_spacing
-                phi_candidate = np.tanh(np.sin(phase) * 3.0)
-                phi[i, j] = eta1[i, j] * phi_candidate  # No if condition: twin amplitude vanishes where eta1=0
+                # Only generate twins where η₁ is significant (>10%)
+                if eta1[i, j] > 0.1:
+                    # Generate periodic twin pattern with full amplitude candidate
+                    phase = 2.0 * np.pi * self.Y[i, j] / twin_spacing
+                    phi_candidate = np.tanh(np.sin(phase) * 3.0)  # Full amplitude oscillation
+                    
+                    # PHYSICALLY CORRECT: Scale amplitude by η₁ to enforce φ→0 as η₁→0
+                    phi[i, j] = eta1[i, j] * phi_candidate
+                else:
+                    # Explicitly zero where η₁ is negligible to prevent floating‑point noise
+                    phi[i, j] = 0.0
+        
+        # STEP 3: Additional robustness improvements
+        # Numerical safeguard: zero where η₁ is extremely small
+        phi = np.where(eta1 < 1e-4, 0.0, phi)
+        
+        # Optional Gaussian smoothing for better numerical behavior
+        if smooth_transition:
+            from scipy.ndimage import gaussian_filter
+            smooth_mask = (eta1 > 0.01) & (eta1 < 0.99)
+            # Compute smoothing factor: decays quadratically away from η₁=0.5
+            smoothing_strength = np.exp(-((eta1[smooth_mask] - 0.5) / 0.2) ** 2)
+            phi[smooth_mask] *= smoothing_strength
+        
         return phi, eta1, eta2
 
     @handle_errors
-    def create_defect_geometry(self, twin_spacing=20.0, defect_type='dislocation', defect_pos=(0, 0), defect_radius=10.0):
-        phi, eta1, eta2 = self.create_twin_grain_geometry(twin_spacing, defect_pos[0])
+    def create_defect_geometry(self, twin_spacing=20.0, defect_type='dislocation', 
+                              defect_pos=(0, 0), defect_radius=10.0, smooth_transition=False):
+        """
+        Create geometry with defects while maintaining PHYSICAL CONSISTENCY 
+        at grain boundaries.
+        
+        Applies the same amplitude modulation principle as create_twin_grain_geometry.
+        """
+        # First create base twin grain geometry with proper amplitude modulation
+        phi, eta1, eta2 = self.create_twin_grain_geometry(
+            twin_spacing,
+            grain_boundary_pos=defect_pos[0],  # Position GB at defect X for simplicity
+            smooth_transition=smooth_transition
+        )
+        
+        center_x, center_y = defect_pos
         
         if defect_type == 'dislocation':
-            center_x, center_y = defect_pos
+            # Modify twin pattern near dislocation core while preserving amplitude modulation
             for i in range(self.N):
                 for j in range(self.N):
                     dist = np.sqrt((self.X[i, j] - center_x)**2 + (self.Y[i, j] - center_y)**2)
-                    if dist < defect_radius:
+                    
+                    # Only modify where twin grain is significant AND within defect radius
+                    if dist < defect_radius and eta1[i, j] > 0.1:
+                        # Create dislocation core by shifting phase (Burgers vector effect)
                         phase_shift = np.exp(-dist**2 / (defect_radius**2)) * np.pi
-                        phase = 2 * np.pi * self.Y[i, j] / twin_spacing + phase_shift
+                        phase = 2.0 * np.pi * self.Y[i, j] / twin_spacing + phase_shift
                         phi_candidate = np.tanh(np.sin(phase) * 3.0)
+                        
+                        # CRITICAL: Maintain amplitude modulation by η₁ even with defect
                         phi[i, j] = eta1[i, j] * phi_candidate
         
         elif defect_type == 'void':
-            center_x, center_y = defect_pos
+            # Remove material in void region while preserving physical consistency
             for i in range(self.N):
                 for j in range(self.N):
                     dist = np.sqrt((self.X[i, j] - center_x)**2 + (self.Y[i, j] - center_y)**2)
                     if dist < defect_radius:
+                        # Complete removal of all fields in void region
                         eta1[i, j] = 0.0
                         eta2[i, j] = 0.0
                         phi[i, j] = 0.0
@@ -1038,7 +1117,7 @@ class EnhancedSpectralSolver:
         return sigma_eq, sxx, syy, sxy, sigma_h, eps_xx, eps_yy, eps_xy
 
 # ============================================================================
-# ENHANCED VISUALIZATION SYSTEM (Matplotlib + Plotly)
+# ENHANCED VISUALIZATION SYSTEM
 # ============================================================================
 class EnhancedTwinVisualizer:
     """Comprehensive visualization system for nanotwinned simulations"""
@@ -1049,7 +1128,7 @@ class EnhancedTwinVisualizer:
         self.extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
         self.line_profiler = EnhancedLineProfiler(N, dx)
        
-        # Expanded colormap library
+        # Expanded colormap library (50+ options)
         self.COLORMAPS = COLORMAPS.copy()
         custom = PublicationEnhancer.create_custom_colormaps()
         self.COLORMAPS.update(custom)
@@ -1074,7 +1153,7 @@ class EnhancedTwinVisualizer:
         if style_params is None:
             style_params = {}
         
-        # Set robust defaults for font sizes
+        # Set robust defaults for font sizes (prevent TypeError)
         defaults = {
             'title_font_size': 10,
             'label_font_size': 8,
@@ -1184,116 +1263,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ========================================================================
-    # NEW: Plotly Interactive Visualization
-    # ========================================================================
-    @handle_errors
-    def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0):
-        """Create an interactive Plotly heatmap for a given field."""
-        if field_name not in results_dict:
-            return None
-       
-        data = results_dict[field_name].copy()
-        title = field_name
-        unit = ""
-        if field_name in ['sigma_eq', 'sigma_h']:
-            data = data / 1e9
-            unit = " (GPa)"
-        elif field_name == 'sigma_y':
-            data = data / 1e6
-            unit = " (MPa)"
-        elif field_name == 'h':
-            unit = " (nm)"
-       
-        # Determine colormap
-        if field_name == 'phi':
-            colorscale = 'RdBu'
-            zmid = 0
-        elif field_name in ['sigma_eq', 'sigma_h']:
-            colorscale = 'Viridis' if field_name == 'sigma_eq' else 'RdBu'
-            zmid = 0 if field_name == 'sigma_h' else None
-        else:
-            colorscale = 'Plasma'
-            zmid = None
-       
-        fig = go.Figure()
-        fig.add_trace(go.Heatmap(
-            z=data,
-            x=np.linspace(self.extent[0], self.extent[1], self.N),
-            y=np.linspace(self.extent[2], self.extent[3], self.N),
-            colorscale=colorscale,
-            zmid=zmid,
-            colorbar=dict(title=f"{field_name}{unit}"),
-            hovertemplate='x: %{x:.1f} nm<br>y: %{y:.1f} nm<br>%{z:.3f}<extra></extra>'
-        ))
-       
-        # Add twin boundary contour (φ=0) if field is not φ itself
-        if field_name != 'phi' and 'phi' in results_dict:
-            phi_data = results_dict['phi']
-            # Create contour lines via a separate trace (simplified: we draw a few isolevels)
-            # For performance, we can sample a few points
-            # Alternatively, we can overlay a scatter plot of zero crossings
-            # Here we use a contour trace with one level
-            fig.add_trace(go.Contour(
-                z=phi_data,
-                x=np.linspace(self.extent[0], self.extent[1], self.N),
-                y=np.linspace(self.extent[2], self.extent[3], self.N),
-                contours=dict(
-                    start=0,
-                    end=0,
-                    size=0,
-                    coloring='none',
-                    showlabels=False
-                ),
-                line=dict(color='white', width=2),
-                showscale=False,
-                hoverinfo='skip'
-            ))
-       
-        fig.update_layout(
-            title=f"{title} (Frame {frame_idx})",
-            xaxis_title="x (nm)",
-            yaxis_title="y (nm)",
-            width=600,
-            height=500,
-            template="plotly_white"
-        )
-        return fig
-
-    @handle_errors
-    def create_plotly_line_profiles(self, results_dict, field_name, profile_types, position_ratio=0.5):
-        """Create interactive line profiles using Plotly."""
-        fig = go.Figure()
-       
-        for ptype in profile_types:
-            distance, profile, _ = self.line_profiler.extract_profile(
-                results_dict[field_name], ptype, position_ratio
-            )
-            if field_name in ['sigma_eq', 'sigma_h']:
-                profile = profile / 1e9
-                ylabel = 'Stress (GPa)'
-            elif field_name == 'sigma_y':
-                profile = profile / 1e6
-                ylabel = 'Stress (MPa)'
-            else:
-                ylabel = field_name
-           
-            fig.add_trace(go.Scatter(
-                x=distance,
-                y=profile,
-                mode='lines',
-                name=ptype.replace('_', ' ').title()
-            ))
-       
-        fig.update_layout(
-            title=f"{field_name} Line Profiles",
-            xaxis_title="Position (nm)",
-            yaxis_title=ylabel,
-            hovermode='x unified',
-            template="plotly_white"
-        )
-        return fig
-
 # ============================================================================
 # MAIN SOLVER CLASS
 # ============================================================================
@@ -1344,15 +1313,23 @@ class NanotwinnedCuSolver:
         geom_type = self.params.get('geometry_type', 'standard')
         twin_spacing = self.params['twin_spacing']
         gb_pos = self.params['grain_boundary_pos']
+        # Optionally pass gb_width if defined in params, otherwise use default
+        gb_width = self.params.get('gb_width', 3.0)
+        smooth_transition = self.params.get('smooth_initial_transition', False)
+        
         if geom_type == 'defect':
             defect_type = self.params.get('defect_type', 'dislocation')
             defect_pos = self.params.get('defect_pos', (0, 0))
             defect_radius = self.params.get('defect_radius', 10.0)
             return self.geom_viz.create_defect_geometry(
-                twin_spacing, defect_type, defect_pos, defect_radius
+                twin_spacing, defect_type, defect_pos, defect_radius,
+                smooth_transition=smooth_transition
             )
         else:
-            return self.geom_viz.create_twin_grain_geometry(twin_spacing, gb_pos)
+            return self.geom_viz.create_twin_grain_geometry(
+                twin_spacing, gb_pos, gb_width=gb_width,
+                smooth_transition=smooth_transition
+            )
 
     @handle_errors
     def compute_local_energy_derivatives(self):
@@ -1376,10 +1353,13 @@ class NanotwinnedCuSolver:
             dh_dphi = 0.25 * (3*self.phi**2 - 2*self.phi - 1)
             nx, ny = n[0], n[1]
             ax, ay = a[0], a[1]
-            # No hard threshold: use eta1 as continuous weight
-            deps_xx_dphi = gamma_tw * nx * ax * dh_dphi * self.eta1
-            deps_yy_dphi = gamma_tw * ny * ay * dh_dphi * self.eta1
-            deps_xy_dphi = 0.5 * gamma_tw * (nx * ay + ny * ax) * dh_dphi * self.eta1
+            active_mask = (self.eta1 > 0.5)
+            deps_xx_dphi = np.zeros_like(self.phi)
+            deps_yy_dphi = np.zeros_like(self.phi)
+            deps_xy_dphi = np.zeros_like(self.phi)
+            deps_xx_dphi[active_mask] = gamma_tw * nx * ax * dh_dphi[active_mask]
+            deps_yy_dphi[active_mask] = gamma_tw * ny * ay * dh_dphi[active_mask]
+            deps_xy_dphi[active_mask] = 0.5 * gamma_tw * (nx * ay + ny * ax) * dh_dphi[active_mask]
             df_el_dphi = -(sxx * deps_xx_dphi + syy * deps_yy_dphi + 2 * sxy * deps_xy_dphi)
             return df_el_dphi
         except Exception as e:
@@ -1478,9 +1458,10 @@ class NanotwinnedCuSolver:
             eps_p_mag = np.sqrt(
                 2/3 * (self.eps_p_xx**2 + self.eps_p_yy**2 + 2*self.eps_p_xy**2 + 1e-15)
             )
-            # Clip plastic strain magnitude to a physically reasonable maximum (10% is high for Cu)
-            eps_p_mag = np.clip(eps_p_mag, 0, 0.5)
+            # Clip plastic strain magnitude to a realistic maximum (e.g., 10)
+            eps_p_mag = np.clip(eps_p_mag, 0, 10.0)
             
+            # Optional warning if plastic strain exceeds 0.1 (10% strain)
             if np.max(eps_p_mag) > 0.1:
                 st.warning(f"⚠️ Large plastic strain detected: {np.max(eps_p_mag):.3f}")
             
@@ -1891,6 +1872,54 @@ class DataExporter:
         return bulk_buffer, f"twin_all_simulations_{timestamp}.zip"
 
 # ============================================================================
+# VERIFICATION TOOLS (Physical Consistency Check)
+# ============================================================================
+def verify_physical_consistency(phi, eta1, dx, threshold_eta=0.2, threshold_phi=0.1):
+    """
+    Verify that twin boundaries terminate at grain boundaries.
+    
+    Parameters
+    ----------
+    phi, eta1 : ndarray
+        Twin order parameter and twin grain order parameter fields.
+    dx : float
+        Grid spacing (nm).
+    threshold_eta : float
+        Eta1 value below which phi should be near zero.
+    threshold_phi : float
+        Maximum allowed |phi| in low‑eta1 regions.
+        
+    Returns
+    -------
+    dict
+        Dictionary containing metrics and a pass/fail verdict.
+    """
+    # Find regions where η₁ is small but |φ| is significant (unphysical)
+    unphysical_mask = (eta1 < threshold_eta) & (np.abs(phi) > threshold_phi)
+    unphysical_area = np.sum(unphysical_mask) * dx**2
+    total_area = phi.size * dx**2
+    unphysical_fraction = unphysical_area / total_area
+    
+    # Check φ amplitude scaling with η₁ in the transition zone
+    transition_mask = (eta1 > 0.1) & (eta1 < 0.9)
+    if np.any(transition_mask):
+        phi_abs = np.abs(phi[transition_mask])
+        eta1_vals = eta1[transition_mask] + 1e-12
+        scaling_ratio = phi_abs / eta1_vals
+        scaling_consistency = np.std(scaling_ratio) / (np.mean(scaling_ratio) + 1e-12)
+    else:
+        scaling_consistency = 0.0
+    
+    passed = (unphysical_fraction < 1e-4) and (scaling_consistency < 0.25)
+    
+    return {
+        'unphysical_area_nm2': unphysical_area,
+        'unphysical_fraction': unphysical_fraction,
+        'scaling_consistency': scaling_consistency,
+        'passed': passed
+    }
+
+# ============================================================================
 # ENHANCED STREAMLIT APPLICATION
 # ============================================================================
 def main():
@@ -1925,11 +1954,10 @@ def main():
     st.markdown('<h1 class="main-header">🔬 Enhanced Nanotwinned Copper Phase-Field Simulator</h1>', unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PERMANENT TWIN BOUNDARY FIX & ADVANCED PLOTLY INTEGRATION:</strong><br>
-    • <span style="color: green;">PHYSICS FIX:</span> Twin amplitude <strong>always</strong> modulated by η₁ (no threshold) – contours terminate perfectly at grain boundaries.<br>
-    • <span style="color: green;">TRANSFORMATION STRAIN:</span> Now scales continuously with η₁ – no hard cutoff, smooth elastic response.<br>
-    • <span style="color: green;">PLASTIC STRAIN:</span> Clipped to 0.5 (50%) – physically realistic for nanotwinned Cu.<br>
-    • <span style="color: green;">PLOTLY TAB:</span> Interactive heatmaps with hover, twin boundary overlay, and live line profiles.<br>
+    <strong>Fully Enhanced with Twin Boundary Fix & Hydrostatic Stress:</strong><br>
+    • <span style="color: green;">PHYSICS FIX:</span> Twin amplitude modulated by η₁ → contours terminate at grain boundary<br>
+    • <span style="color: green;">NEW FIELD:</span> Hydrostatic stress σ_h (diverging colormap)<br>
+    • <span style="color: green;">ROBUST:</span> Font size casting eliminates TypeError • Bilinear interpolation • Overstress clipping (max 5)<br>
     • <span style="color: green;">ALL PREVIOUS FEATURES:</span> 50+ colormaps, journal templates, database, comparison, bulk export, etc.
     </div>
     """, unsafe_allow_html=True)
@@ -1980,6 +2008,10 @@ def main():
             twin_spacing = st.slider("Twin spacing λ (nm)", 5.0, 100.0, 20.0, 1.0, key="twin_spacing")
             grain_boundary_pos = st.slider("Grain boundary position (nm)", -50.0, 50.0, 0.0, 1.0, key="gb_pos")
            
+            # Optional grain boundary width control
+            gb_width = st.slider("Grain boundary width (nm)", 1.0, 10.0, 3.0, 0.5, key="gb_width",
+                                help="Width of the smooth transition zone between grains")
+           
             if geometry_type == "Twin Grain with Defect":
                 st.subheader("⚠️ Defect Parameters")
                 defect_type = st.selectbox("Defect Type", ["Dislocation", "Void"], key="defect_type")
@@ -2021,6 +2053,8 @@ def main():
                 stability_factor = st.slider("Stability factor", 0.1, 1.0, 0.5, 0.1)
                 enable_monitoring = st.checkbox("Enable real-time monitoring", True)
                 auto_adjust_dt = st.checkbox("Auto-adjust time step", True)
+                smooth_initial_transition = st.checkbox("Smooth initial twin amplitude", False,
+                                                        help="Apply Gaussian smoothing to the twin amplitude near GB for improved numerical stability")
            
             # ================================================================
             # Visualization settings (including scale bar customization)
@@ -2049,11 +2083,13 @@ def main():
                     'kappa0': kappa0, 'gamma_aniso': gamma_aniso, 'kappa_eta': kappa_eta,
                     'L_CTB': L_CTB, 'L_ITB': L_ITB, 'n_mob': n_mob, 'L_eta': L_eta, 'zeta': zeta,
                     'twin_spacing': twin_spacing, 'grain_boundary_pos': grain_boundary_pos,
+                    'gb_width': gb_width,
                     'geometry_type': 'defect' if geometry_type == "Twin Grain with Defect" else 'standard',
                     'applied_stress': applied_stress_MPa * 1e6,
                     'n_steps': n_steps,
                     'save_frequency': save_frequency,
                     'stability_factor': stability_factor,
+                    'smooth_initial_transition': smooth_initial_transition,
                     'cmap_phi': sim_cmap_phi,
                     'cmap_stress': sim_cmap_stress,
                     'cmap_hydro': sim_cmap_hydro,
@@ -2078,10 +2114,20 @@ def main():
                     geom_viz = InitialGeometryVisualizer(N, dx)
                     if geometry_type == "Twin Grain with Defect":
                         phi, eta1, eta2 = geom_viz.create_defect_geometry(
-                            twin_spacing, defect_type.lower(), (defect_x, defect_y), defect_radius
+                            twin_spacing, defect_type.lower(), (defect_x, defect_y), defect_radius,
+                            smooth_transition=smooth_initial_transition
                         )
                     else:
-                        phi, eta1, eta2 = geom_viz.create_twin_grain_geometry(twin_spacing, grain_boundary_pos)
+                        phi, eta1, eta2 = geom_viz.create_twin_grain_geometry(
+                            twin_spacing, grain_boundary_pos, gb_width=gb_width,
+                            smooth_transition=smooth_initial_transition
+                        )
+                   
+                    # Optional: run physical consistency check
+                    consistency = verify_physical_consistency(phi, eta1, dx)
+                    if not consistency['passed']:
+                        st.warning("⚠️ Initial geometry may have minor physical inconsistencies. "
+                                  f"Unphysical area: {consistency['unphysical_area_nm2']:.4f} nm²")
                    
                     st.session_state.initial_geometry = {
                         'phi': phi, 'eta1': eta1, 'eta2': eta2,
@@ -2179,7 +2225,7 @@ def main():
     # Mode-specific main display
     if operation_mode == "Compare Saved Simulations" and 'comparison_config' in st.session_state:
         # ----------------------------------------------
-        # COMPARISON DISPLAY (unchanged from previous version)
+        # COMPARISON DISPLAY
         # ----------------------------------------------
         st.header("🔬 Multi-Simulation Comparison")
         config = st.session_state.comparison_config
@@ -2210,9 +2256,248 @@ def main():
                 unit_scale = 1
                 unit_label = ''
            
-            # (All comparison sub‑modes are identical to the original code; omitted here for brevity but fully functional)
-            st.info("Comparison display is fully implemented; see original code for details.")
-       
+            # -----------------------------------------------------------------
+            # 1. Side-by-Side Heatmaps (with interpolation and φ contours)
+            # -----------------------------------------------------------------
+            if config['type'] == "Side-by-Side Heatmaps":
+                n_sims = len(simulations)
+                cols = min(3, n_sims)
+                rows = (n_sims + cols - 1) // cols
+                fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+                if rows == 1 and cols == 1:
+                    axes = np.array([[axes]])
+                elif rows == 1:
+                    axes = axes.reshape(1, -1)
+                elif cols == 1:
+                    axes = axes.reshape(-1, 1)
+               
+                for idx, sim in enumerate(simulations):
+                    row = idx // cols
+                    col = idx % cols
+                    ax = axes[row, col]
+                   
+                    history = sim.get('results_history', [])
+                    if history:
+                        results = history[-1]  # final frame
+                        data = results.get(field)
+                        if data is not None:
+                            if field in ['sigma_eq', 'sigma_h', 'sigma_y']:
+                                data_disp = data / unit_scale
+                            else:
+                                data_disp = data
+                           
+                            cmap_name = sim.get('params', {}).get(f'cmap_{field}', 'viridis')
+                            visualizer = EnhancedTwinVisualizer(sim['params']['N'], sim['params']['dx'])
+                            cmap = visualizer.get_colormap(cmap_name)
+                           
+                            # Use bilinear interpolation to avoid pixel squares
+                            im = ax.imshow(data_disp, extent=visualizer.extent, cmap=cmap,
+                                          origin='lower', aspect='equal', interpolation='bilinear')
+                            ax.set_title(f"λ={sim['params'].get('twin_spacing', 0):.1f}nm, σ={sim['params'].get('applied_stress', 0)/1e6:.0f}MPa",
+                                       fontsize=9)
+                            ax.set_xlabel('x (nm)')
+                            ax.set_ylabel('y (nm)')
+                            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label(f'{field} {unit_label}')
+                           
+                            # Add white contours for twin boundaries (φ = 0) if available
+                            if 'phi' in results:
+                                ax.contour(np.linspace(visualizer.extent[0], visualizer.extent[1], visualizer.N),
+                                          np.linspace(visualizer.extent[2], visualizer.extent[3], visualizer.N),
+                                          results['phi'], levels=[0], colors='white', linewidths=1, alpha=0.8)
+                    else:
+                        ax.text(0.5, 0.5, 'No data', ha='center', va='center')
+               
+                for idx in range(n_sims, rows*cols):
+                    row = idx // cols
+                    col = idx % cols
+                    axes[row, col].axis('off')
+               
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+           
+            # -----------------------------------------------------------------
+            # 2. Overlay Line Profiles
+            # -----------------------------------------------------------------
+            elif config['type'] == "Overlay Line Profiles":
+                fig, ax = plt.subplots(figsize=(10, 6))
+                colors = plt.cm.tab10(np.linspace(0, 1, len(simulations)))
+               
+                for idx, (sim, color) in enumerate(zip(simulations, colors)):
+                    history = sim.get('results_history', [])
+                    if history:
+                        results = history[-1]
+                        data = results.get(field)
+                        if data is not None:
+                            Nsim = sim['params']['N']
+                            dxsim = sim['params']['dx']
+                            profiler = EnhancedLineProfiler(Nsim, dxsim)
+                           
+                            try:
+                                distance, profile, _ = profiler.extract_profile(
+                                    data, config.get('profile_direction', 'horizontal'),
+                                    config.get('position_ratio', 0.5),
+                                    config.get('custom_angle', 45) if config.get('profile_direction') == 'custom' else 45
+                                )
+                                if field in ['sigma_eq', 'sigma_h', 'sigma_y']:
+                                    profile = profile / unit_scale
+                               
+                                label = f"λ={sim['params'].get('twin_spacing', 0):.1f}nm, σ={sim['params'].get('applied_stress', 0)/1e6:.0f}MPa"
+                                ax.plot(distance, profile, color=color, linewidth=2, label=label)
+                            except Exception as e:
+                                st.warning(f"Could not extract profile for simulation {sim['id']}: {e}")
+               
+                ax.set_xlabel('Position (nm)')
+                ax.set_ylabel(f'{field} {unit_label}')
+                ax.set_title(f'Line Profile Comparison ({config.get("profile_direction", "horizontal").title()})')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+                plt.close(fig)
+           
+            # -----------------------------------------------------------------
+            # 3. Statistical Summary
+            # -----------------------------------------------------------------
+            elif config['type'] == "Statistical Summary":
+                stats_list = []
+                data_for_box = []
+                labels = []
+               
+                for sim in simulations:
+                    history = sim.get('results_history', [])
+                    if history:
+                        results = history[-1]
+                        data = results.get(field)
+                        if data is not None:
+                            flat = data.flatten()
+                            flat = flat[np.isfinite(flat)]
+                            if field in ['sigma_eq', 'sigma_h', 'sigma_y']:
+                                flat = flat / unit_scale
+                           
+                            stats_list.append({
+                                'ID': sim['id'][:8],
+                                'λ (nm)': sim['params'].get('twin_spacing', 0),
+                                'σ_app (MPa)': sim['params'].get('applied_stress', 0)/1e6,
+                                'W': sim['params'].get('W', 0),
+                                'Mean': np.mean(flat),
+                                'Std': np.std(flat),
+                                'Min': np.min(flat),
+                                'Max': np.max(flat),
+                                'Median': np.median(flat),
+                                'Skewness': stats.skew(flat) if len(flat) > 0 else 0,
+                                'Kurtosis': stats.kurtosis(flat) if len(flat) > 0 else 0
+                            })
+                            data_for_box.append(flat)
+                            labels.append(f"{sim['params'].get('twin_spacing', 0)}nm, {sim['params'].get('applied_stress', 0)/1e6:.0f}MPa")
+               
+                if stats_list:
+                    df_stats = pd.DataFrame(stats_list)
+                    st.dataframe(df_stats.style.format({
+                        'Mean': '{:.3f}', 'Std': '{:.3f}', 'Min': '{:.3f}', 'Max': '{:.3f}',
+                        'Median': '{:.3f}', 'Skewness': '{:.3f}', 'Kurtosis': '{:.3f}'
+                    }), use_container_width=True)
+                   
+                    # Box plot
+                    if data_for_box:
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        bp = ax.boxplot(data_for_box, labels=labels, patch_artist=True,
+                                       showmeans=True, meanline=True, showfliers=False)
+                        colors_plot = plt.cm.viridis(np.linspace(0, 1, len(data_for_box)))
+                        for patch, color in zip(bp['boxes'], colors_plot):
+                            patch.set_facecolor(color)
+                            patch.set_alpha(0.7)
+                        ax.set_ylabel(f'{field} {unit_label}')
+                        ax.set_title(f'Statistical Distribution of {field}')
+                        ax.grid(True, alpha=0.3)
+                        plt.xticks(rotation=45, ha='right')
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close(fig)
+                else:
+                    st.info("No valid data for statistical summary.")
+           
+            # -----------------------------------------------------------------
+            # 4. Correlation Analysis
+            # -----------------------------------------------------------------
+            elif config['type'] == "Correlation Analysis":
+                # Simple correlation between twin spacing and max stress
+                twin_spacings = []
+                max_stresses = []
+                labels_corr = []
+                for sim in simulations:
+                    history = sim.get('results_history', [])
+                    if history:
+                        results = history[-1]
+                        data = results.get('sigma_eq')
+                        if data is not None:
+                            twin_spacings.append(sim['params'].get('twin_spacing', 0))
+                            max_stresses.append(np.max(data) / 1e9)  # GPa
+                            labels_corr.append(f"{sim['id'][:8]}")
+               
+                if len(twin_spacings) >= 2:
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    ax.scatter(twin_spacings, max_stresses, s=80, c='blue', alpha=0.7, edgecolors='k')
+                    for i, txt in enumerate(labels_corr):
+                        ax.annotate(txt, (twin_spacings[i], max_stresses[i]), fontsize=8)
+                   
+                    # Linear fit
+                    z = np.polyfit(twin_spacings, max_stresses, 1)
+                    p = np.poly1d(z)
+                    x_fit = np.linspace(min(twin_spacings), max(twin_spacings), 100)
+                    ax.plot(x_fit, p(x_fit), 'r--', alpha=0.8, label=f'Fit: y={z[0]:.3f}x+{z[1]:.3f}')
+                   
+                    ax.set_xlabel('Twin Spacing λ (nm)')
+                    ax.set_ylabel('Max Von Mises Stress (GPa)')
+                    ax.set_title('Correlation: Twin Spacing vs Peak Stress')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                    plt.close(fig)
+                else:
+                    st.info("Need at least two simulations for correlation analysis.")
+           
+            # -----------------------------------------------------------------
+            # 5. Evolution Timeline
+            # -----------------------------------------------------------------
+            elif config['type'] == "Evolution Timeline":
+                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+               
+                for sim in simulations:
+                    if 'history' in sim and sim['history']:
+                        history = sim['history']
+                        params_sim = sim['params']
+                        dt_sim = params_sim.get('dt', 1e-4)
+                        timesteps = np.arange(len(history['phi_norm'])) * dt_sim
+                       
+                        # Phi norm
+                        axes[0, 0].plot(timesteps, history['phi_norm'], label=f"λ={params_sim.get('twin_spacing', 0):.1f}nm")
+                        # Energy
+                        axes[0, 1].plot(timesteps, history['energy'], label=f"λ={params_sim.get('twin_spacing', 0):.1f}nm")
+                        # Max stress
+                        axes[0, 2].plot(timesteps, np.array(history['max_stress'])/1e9, label=f"λ={params_sim.get('twin_spacing', 0):.1f}nm")
+                        # Plastic work
+                        axes[1, 0].plot(timesteps, history['plastic_work'], label=f"λ={params_sim.get('twin_spacing', 0):.1f}nm")
+                        # Twin spacing
+                        axes[1, 1].plot(timesteps, history['twin_spacing_avg'], label=f"λ={params_sim.get('twin_spacing', 0):.1f}nm")
+               
+                axes[0, 0].set_xlabel('Time (ns)'); axes[0, 0].set_ylabel('||φ||'); axes[0, 0].set_title('Twin Norm')
+                axes[0, 1].set_xlabel('Time (ns)'); axes[0, 1].set_ylabel('Energy (J)'); axes[0, 1].set_title('Total Energy')
+                axes[0, 2].set_xlabel('Time (ns)'); axes[0, 2].set_ylabel('Max Stress (GPa)'); axes[0, 2].set_title('Peak Stress')
+                axes[1, 0].set_xlabel('Time (ns)'); axes[1, 0].set_ylabel('Plastic Work (J)'); axes[1, 0].set_title('Plastic Work')
+                axes[1, 1].set_xlabel('Time (ns)'); axes[1, 1].set_ylabel('Avg Spacing (nm)'); axes[1, 1].set_title('Twin Spacing')
+                axes[1, 2].axis('off')
+               
+                for ax in axes.flat:
+                    ax.legend(fontsize=7)
+                    ax.grid(True, alpha=0.3)
+               
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+           
+            # Clear config after display (optional)
+            # del st.session_state.comparison_config
+   
     elif operation_mode == "Single Simulation View" and 'selected_sim_id' in st.session_state:
         # ----------------------------------------------
         # SINGLE SIMULATION VIEW (with animation)
@@ -2263,7 +2548,7 @@ def main():
                 # Get current frame
                 results = history[frame_idx]
                
-                # Visualize using enhanced visualizer
+                # Visualize using enhanced visualizer, passing scale bar settings
                 visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
@@ -2290,15 +2575,14 @@ def main():
    
     elif operation_mode == "Run New Simulation" and 'initialized' in st.session_state:
         # ----------------------------------------------
-        # RUN NEW SIMULATION - TABBED INTERFACE (WITH NEW PLOTLY TAB)
+        # RUN NEW SIMULATION - TABBED INTERFACE
         # ----------------------------------------------
         params = st.session_state.initial_geometry['params']
         N = params['N']; dx = params['dx']
         visualizer = EnhancedTwinVisualizer(N, dx)
        
-        # Add a new tab for Plotly interactive visualization
         tabs = st.tabs(["📐 Initial Geometry", "▶️ Run Simulation", "📊 Basic Results",
-                        "🔍 Advanced Analysis", "📊 Plotly Interactive", "📤 Enhanced Export"])
+                        "🔍 Advanced Analysis", "📤 Enhanced Export"])
        
         with tabs[0]:  # Initial Geometry
             st.header("Initial Geometry Visualization")
@@ -2307,10 +2591,24 @@ def main():
             eta1 = st.session_state.initial_geometry['eta1']
             eta2 = st.session_state.initial_geometry['eta2']
            
+            # Optional consistency check
+            with st.expander("🔍 Physical Consistency Check"):
+                consistency = verify_physical_consistency(phi, eta1, dx)
+                colA, colB = st.columns(2)
+                with colA:
+                    st.metric("Unphysical area", f"{consistency['unphysical_area_nm2']:.4f} nm²")
+                    st.metric("Scaling consistency", f"{consistency['scaling_consistency']:.3f}")
+                with colB:
+                    if consistency['passed']:
+                        st.success("✅ Physically consistent initialization")
+                    else:
+                        st.warning("⚠️ Minor inconsistencies detected (φ not fully zero at GB)")
+               
             phi_gx, phi_gy = compute_gradients_numba(phi, dx)
             h = compute_twin_spacing_numba(phi_gx, phi_gy)
             initial_results = {'phi': phi, 'eta1': eta1, 'h': h}
            
+            # Use style parameters including scale bar settings
             style_params = {
                 'scalebar_color': params.get('scalebar_color', 'black'),
                 'scalebar_fontsize': params.get('scalebar_fontsize', 10)
@@ -2371,6 +2669,7 @@ def main():
                                     avg_h = np.mean(valid_h) if len(valid_h) > 0 else 0
                                     st.metric("Avg Spacing", f"{avg_h:.1f} nm")
                                 with monitoring_cols[2]:
+                                    # Plastic strain is now clipped to a realistic maximum
                                     st.metric("Max Plastic Strain", f"{np.max(results['eps_p_mag']):.4f}")
                                 with monitoring_cols[3]:
                                     st.metric("Energy", f"{results['convergence']['energy']:.2e} J")
@@ -2484,55 +2783,7 @@ def main():
             else:
                 st.info("Run a simulation first.")
        
-        # ====================================================================
-        # NEW TAB: Plotly Interactive Visualization
-        # ====================================================================
-        with tabs[4]:
-            st.header("📊 Plotly Interactive Visualization")
-            if 'results_history' in st.session_state:
-                results_history = st.session_state.results_history
-               
-                # Field selector
-                plotly_field = st.selectbox(
-                    "Select field to visualize",
-                    ["phi", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
-                    index=0
-                )
-               
-                # Frame slider
-                frame_idx_plotly = st.slider("Frame", 0, len(results_history)-1, len(results_history)-1,
-                                             key="plotly_frame")
-                results = results_history[frame_idx_plotly]
-               
-                # Create interactive heatmap
-                fig_heatmap = visualizer.create_plotly_heatmap(results, plotly_field, frame_idx_plotly)
-                if fig_heatmap:
-                    st.plotly_chart(fig_heatmap, use_container_width=True)
-               
-                st.markdown("---")
-               
-                # Interactive line profiles
-                st.subheader("Interactive Line Profiles")
-                col1, col2 = st.columns(2)
-                with col1:
-                    profile_type_plotly = st.selectbox(
-                        "Profile direction",
-                        ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal"],
-                        key="plotly_profile"
-                    )
-                with col2:
-                    position_ratio_plotly = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
-                                                       key="plotly_pos")
-               
-                internal_pt = profile_type_mapping.get(profile_type_plotly, "horizontal")
-                fig_line = visualizer.create_plotly_line_profiles(
-                    results, plotly_field, [internal_pt], position_ratio_plotly
-                )
-                st.plotly_chart(fig_line, use_container_width=True)
-            else:
-                st.info("Run a simulation first to generate interactive plots.")
-       
-        with tabs[5]:  # Enhanced Export (formerly tab 4)
+        with tabs[4]:  # Enhanced Export
             st.header("Enhanced Export Options")
             if 'results_history' in st.session_state:
                 # Individual format downloads
