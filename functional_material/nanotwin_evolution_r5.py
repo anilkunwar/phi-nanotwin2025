@@ -33,6 +33,9 @@ class EnhancedLineProfiler:
         """
         Extract line profiles from 2D data with proper scaling
         """
+        # NORMALIZATION FIX: Convert any UI format to internal format
+        profile_type = self._normalize_profile_type(profile_type)
+        
         ny, nx = data.shape
         center_x, center_y = nx // 2, ny // 2
         
@@ -160,6 +163,33 @@ class EnhancedLineProfiler:
             raise ValueError(f"Unknown profile type: {profile_type}")
         
         return distance, profile, endpoints
+    
+    def _normalize_profile_type(self, profile_type):
+        """Normalize profile type from UI format to internal format"""
+        # Convert to lowercase and replace hyphens with underscores
+        normalized = str(profile_type).lower().replace('-', '_')
+        
+        # Mapping for common UI variations
+        mapping = {
+            'horizontal': 'horizontal',
+            'h': 'horizontal',
+            'x': 'horizontal',
+            'vertical': 'vertical',
+            'v': 'vertical',
+            'y': 'vertical',
+            'diagonal': 'diagonal',
+            'd': 'diagonal',
+            'diag': 'diagonal',
+            'anti_diagonal': 'anti_diagonal',
+            'antidiagonal': 'anti_diagonal',
+            'anti-diagonal': 'anti_diagonal',
+            'ad': 'anti_diagonal',
+            'custom': 'custom',
+            'c': 'custom',
+            'angled': 'custom'
+        }
+        
+        return mapping.get(normalized, normalized)
 
 class PublicationEnhancer:
     """Advanced plotting enhancements for publication-quality figures"""
@@ -430,9 +460,31 @@ class EnhancedTwinVisualizer:
     
     def create_enhanced_line_profiles(self, results_dict, profile_config):
         """Create enhanced line profile analysis"""
-        profile_types = profile_config.get('types', ['horizontal', 'vertical'])
+        # FIX: Normalize profile types from UI format to internal format
+        profile_types = profile_config.get('types', ['horizontal'])
         position_ratio = profile_config.get('position_ratio', 0.5)
         angle_deg = profile_config.get('angle_deg', 45)
+        
+        # Convert UI profile type names to internal profile type names
+        profile_type_mapping = {
+            "Horizontal": "horizontal",
+            "Vertical": "vertical",
+            "Diagonal": "diagonal",
+            "Anti-Diagonal": "anti_diagonal",
+            "Custom": "custom"
+        }
+        
+        # Normalize all profile types
+        normalized_types = []
+        for pt in profile_types:
+            # First try direct mapping from UI strings
+            if pt in profile_type_mapping:
+                normalized_types.append(profile_type_mapping[pt])
+            else:
+                # Use the line profiler's normalization method
+                normalized_types.append(self.line_profiler._normalize_profile_type(pt))
+        
+        profile_types = normalized_types
         
         # Select which fields to profile
         fields_to_profile = ['phi', 'sigma_eq', 'h', 'eps_p_mag']
@@ -461,7 +513,7 @@ class EnhancedTwinVisualizer:
                 # Plot profile
                 ax_profiles.plot(distance, profile, 
                                linewidth=2, alpha=0.8,
-                               label=f'{profile_type.title()} Profile')
+                               label=f'{profile_type.replace("_", " ").title()} Profile')
             
             ax_profiles.set_xlabel('Position (nm)', fontsize=10)
             ax_profiles.set_ylabel(field_name.replace('_', ' ').title(), fontsize=10)
@@ -475,9 +527,13 @@ class EnhancedTwinVisualizer:
                                    origin='lower', aspect='equal')
             
             # Plot profile lines
-            profile_colors = {'horizontal': 'red', 'vertical': 'blue', 
-                            'diagonal': 'green', 'anti_diagonal': 'purple',
-                            'custom': 'orange'}
+            profile_colors = {
+                'horizontal': 'red', 
+                'vertical': 'blue', 
+                'diagonal': 'green', 
+                'anti_diagonal': 'purple',
+                'custom': 'orange'
+            }
             
             for profile_type in profile_types:
                 distance, profile, endpoints = self.line_profiler.extract_profile(
@@ -1293,6 +1349,7 @@ def main():
                     index=0
                 )
                 
+                # FIX: Profile direction normalization for comparison
                 if comparison_type == "Overlay Line Profiles":
                     profile_direction = st.selectbox(
                         "Profile Direction",
@@ -1300,6 +1357,16 @@ def main():
                         index=0
                     )
                     position_ratio = st.slider("Position Ratio", 0.0, 1.0, 0.5, 0.1)
+                    
+                    # Convert UI profile direction to internal format
+                    profile_type_mapping = {
+                        "Horizontal": "horizontal",
+                        "Vertical": "vertical",
+                        "Diagonal": "diagonal",
+                        "Anti-Diagonal": "anti_diagonal",
+                        "Custom": "custom"
+                    }
+                    internal_direction = profile_type_mapping.get(profile_direction, "horizontal")
                 
                 # Field selection for comparison
                 field_to_compare = st.selectbox(
@@ -1310,13 +1377,18 @@ def main():
                 )
                 
                 if st.button("🔬 Run Comparison", type="primary"):
-                    st.session_state.comparison_config = {
+                    comparison_config = {
                         'sim_ids': [sim_options[name] for name in selected_sim_ids],
                         'type': comparison_type,
-                        'field': field_to_compare,
-                        'profile_direction': profile_direction if comparison_type == "Overlay Line Profiles" else None,
-                        'position_ratio': position_ratio if comparison_type == "Overlay Line Profiles" else None
+                        'field': field_to_compare.split()[0],  # Extract field name
                     }
+                    
+                    # Add profile-specific config
+                    if comparison_type == "Overlay Line Profiles":
+                        comparison_config['profile_direction'] = internal_direction
+                        comparison_config['position_ratio'] = position_ratio
+                    
+                    st.session_state.comparison_config = comparison_config
                     st.session_state.operation_mode = 'compare'
                     st.rerun()
     
@@ -1472,16 +1544,31 @@ def main():
                         )
                     
                     results = st.session_state.results_history[-1]
+                    
+                    # FIX: Convert UI profile type names to internal profile type names
+                    profile_type_mapping = {
+                        "Horizontal": "horizontal",
+                        "Vertical": "vertical",
+                        "Diagonal": "diagonal",
+                        "Anti-Diagonal": "anti_diagonal",
+                        "Custom": "custom"
+                    }
+                    internal_profile_types = [profile_type_mapping.get(pt, pt.lower().replace('-', '_')) for pt in profile_types]
+                    
                     profile_config = {
-                        'types': profile_types,
+                        'types': internal_profile_types,  # Use normalized types here
                         'position_ratio': position_ratio
                     }
                     
-                    fig_profiles = visualizer.create_enhanced_line_profiles(
-                        {field_to_profile: results[field_to_profile]},
-                        profile_config
-                    )
-                    st.pyplot(fig_profiles)
+                    try:
+                        fig_profiles = visualizer.create_enhanced_line_profiles(
+                            {field_to_profile: results[field_to_profile]},
+                            profile_config
+                        )
+                        st.pyplot(fig_profiles)
+                    except Exception as e:
+                        st.error(f"Error creating line profiles: {str(e)}")
+                        st.info("Try selecting different profile directions or check your simulation data.")
                 
                 elif analysis_type == "Statistical Analysis":
                     st.subheader("Statistical Analysis")
@@ -1533,47 +1620,137 @@ def main():
             
             if not simulations:
                 st.info("Run multiple simulations first to enable comparison")
+            elif 'comparison_config' in st.session_state and st.session_state.operation_mode == 'compare':
+                comparison_config = st.session_state.comparison_config
+                
+                # Load selected simulations
+                selected_sims = []
+                for sim_id in comparison_config['sim_ids']:
+                    if 'twin_simulations' in st.session_state and sim_id in st.session_state.twin_simulations:
+                        selected_sims.append(st.session_state.twin_simulations[sim_id])
+                
+                if len(selected_sims) < 2:
+                    st.warning("Please select at least 2 simulations for comparison")
+                else:
+                    st.subheader(f"Comparison: {comparison_config['type']}")
+                    
+                    if comparison_config['type'] == "Side-by-Side Fields":
+                        # Create side-by-side comparison
+                        cols = st.columns(len(selected_sims))
+                        for idx, sim in enumerate(selected_sims):
+                            with cols[idx]:
+                                st.markdown(f"**Simulation {idx+1}**")
+                                if sim['results_history']:
+                                    results = sim['results_history'][-1]
+                                    field_data = results.get(comparison_config['field'], None)
+                                    if field_data is not None:
+                                        fig, ax = plt.subplots(figsize=(4, 3))
+                                        vmax = np.percentile(field_data, 95)
+                                        im = ax.imshow(field_data, cmap='hot', 
+                                                      vmin=0, vmax=vmax,
+                                                      aspect='equal')
+                                        ax.set_title(f"λ={sim['params'].get('twin_spacing', 0):.1f}nm")
+                                        ax.axis('off')
+                                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                                        st.pyplot(fig)
+                    
+                    elif comparison_config['type'] == "Overlay Line Profiles":
+                        st.subheader("Overlay Line Profiles Comparison")
+                        
+                        # Create overlay plot
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        
+                        colors = plt.cm.rainbow(np.linspace(0, 1, len(selected_sims)))
+                        
+                        for idx, sim in enumerate(selected_sims):
+                            if sim['results_history']:
+                                results = sim['results_history'][-1]
+                                field_data = results.get(comparison_config['field'], None)
+                                
+                                if field_data is not None:
+                                    # Use the line profiler
+                                    profiler = EnhancedLineProfiler(
+                                        field_data.shape[0], 
+                                        sim['params'].get('dx', 0.5)
+                                    )
+                                    
+                                    distance, profile, endpoints = profiler.extract_profile(
+                                        field_data,
+                                        comparison_config.get('profile_direction', 'horizontal'),
+                                        comparison_config.get('position_ratio', 0.5)
+                                    )
+                                    
+                                    ax.plot(distance, profile, 
+                                           color=colors[idx],
+                                           linewidth=2,
+                                           alpha=0.7,
+                                           label=f"λ={sim['params'].get('twin_spacing', 0):.1f}nm")
+                        
+                        ax.set_xlabel('Position (nm)', fontsize=12)
+                        ax.set_ylabel(comparison_config['field'].replace('_', ' ').title(), fontsize=12)
+                        ax.set_title(f"{comparison_config['field'].replace('_', ' ').title()} Profile Comparison", 
+                                   fontsize=14)
+                        ax.legend(fontsize=10)
+                        ax.grid(True, alpha=0.3)
+                        
+                        st.pyplot(fig)
+                    
+                    elif comparison_config['type'] == "Statistical Summary":
+                        # Create statistical comparison table
+                        st.subheader("Statistical Comparison")
+                        
+                        stats_data = []
+                        for sim in selected_sims:
+                            if sim['results_history']:
+                                results = sim['results_history'][-1]
+                                field_data = results.get(comparison_config['field'], None)
+                                
+                                if field_data is not None:
+                                    stats_data.append({
+                                        'Twin Spacing (nm)': sim['params'].get('twin_spacing', 0),
+                                        'Mean': np.mean(field_data),
+                                        'Std Dev': np.std(field_data),
+                                        'Max': np.max(field_data),
+                                        'Min': np.min(field_data),
+                                        '95th %ile': np.percentile(field_data, 95)
+                                    })
+                        
+                        if stats_data:
+                            df = pd.DataFrame(stats_data)
+                            st.dataframe(df.style.format({
+                                'Mean': '{:.3e}',
+                                'Std Dev': '{:.3e}',
+                                'Max': '{:.3e}',
+                                'Min': '{:.3e}',
+                                '95th %ile': '{:.3e}'
+                            }), use_container_width=True)
+                    
+                    # Clear comparison state after display
+                    if 'comparison_config' in st.session_state:
+                        del st.session_state.comparison_config
+                    if 'operation_mode' in st.session_state:
+                        del st.session_state.operation_mode
             else:
                 # Display available simulations
                 st.subheader("Available Simulations")
                 
-                sim_data = []
-                for sim in simulations:
-                    sim_data.append({
-                        'ID': sim['id'][:8],
-                        'Twin Spacing': f"{sim['params'].get('twin_spacing', 0):.1f} nm",
-                        'Applied Stress': f"{sim['params'].get('applied_stress', 0)/1e6:.0f} MPa",
-                        'Frames': len(simulations[0]['results']) if simulations and simulations[0]['results'] else 0,
-                        'Created': sim.get('created_at', '')[:19]
-                    })
-                
-                df = pd.DataFrame(sim_data)
-                st.dataframe(df, use_container_width=True)
-                
-                # Comparison visualization
-                if len(simulations) >= 2:
-                    st.subheader("Comparison Visualization")
+                if simulations:
+                    sim_data = []
+                    for sim in simulations:
+                        sim_data.append({
+                            'ID': sim['id'][:8],
+                            'Twin Spacing': f"{sim['params'].get('twin_spacing', 0):.1f} nm",
+                            'Applied Stress': f"{sim['params'].get('applied_stress', 0)/1e6:.0f} MPa",
+                            'Frames': len(sim['results']) if sim['results'] else 0,
+                            'Created': sim.get('created_at', '')[:19]
+                        })
                     
-                    comparison_type = st.selectbox(
-                        "Visualization Type",
-                        ["Stress Distribution", "Twin Spacing", "Convergence Rate"],
-                        index=0
-                    )
+                    df = pd.DataFrame(sim_data)
+                    st.dataframe(df, use_container_width=True)
                     
-                    if comparison_type == "Stress Distribution":
-                        col1, col2 = st.columns(2)
-                        for idx, sim in enumerate(simulations[:4]):
-                            with (col1 if idx % 2 == 0 else col2):
-                                if sim['results']:
-                                    stress_data = sim['results']['sigma_eq'] / 1e9
-                                    fig, ax = plt.subplots(figsize=(4, 3))
-                                    im = ax.imshow(stress_data, cmap='hot', 
-                                                  vmin=0, vmax=np.percentile(stress_data, 95),
-                                                  aspect='equal')
-                                    ax.set_title(f"Sim {idx+1}: {sim['params'].get('twin_spacing', 0):.1f}nm")
-                                    ax.axis('off')
-                                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                                    st.pyplot(fig)
+                    st.info("Configure comparison settings in the sidebar and click 'Run Comparison'")
+                else:
+                    st.info("Run simulations first to enable comparison")
         
         with tabs[5]:  # Enhanced Export
             st.header("Enhanced Export Options")
@@ -1624,7 +1801,7 @@ def main():
                                 zip_file.writestr(f"convergence_history_{timestamp}.npz", npz_buffer.getvalue())
                             
                             # 4. Generate and save figures
-                            if "Publication Figures (PNG)" in export_format:
+                            if "Publication Figures (PNG)" in export_format or "Complete ZIP Package" in export_format:
                                 # Create multi-field comparison figure
                                 fig_comparison = visualizer.create_multi_field_comparison(final_results)
                                 img_buffer = BytesIO()
@@ -1632,14 +1809,17 @@ def main():
                                 zip_file.writestr(f"field_comparison_{timestamp}.png", img_buffer.getvalue())
                                 
                                 # Create line profile figure
-                                profile_config = {'types': ['Horizontal', 'Vertical'], 'position_ratio': 0.5}
-                                fig_profiles = visualizer.create_enhanced_line_profiles(
-                                    {'sigma_eq': final_results['sigma_eq']}, 
-                                    profile_config
-                                )
-                                img_buffer = BytesIO()
-                                fig_profiles.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
-                                zip_file.writestr(f"line_profiles_{timestamp}.png", img_buffer.getvalue())
+                                profile_config = {'types': ['horizontal', 'vertical'], 'position_ratio': 0.5}
+                                try:
+                                    fig_profiles = visualizer.create_enhanced_line_profiles(
+                                        {'sigma_eq': final_results['sigma_eq']}, 
+                                        profile_config
+                                    )
+                                    img_buffer = BytesIO()
+                                    fig_profiles.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+                                    zip_file.writestr(f"line_profiles_{timestamp}.png", img_buffer.getvalue())
+                                except Exception as e:
+                                    st.warning(f"Could not create line profile figure: {str(e)}")
                             
                             # 5. Save summary CSV
                             csv_data = []
