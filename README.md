@@ -24,3 +24,7 @@ Engineering Design with Advanced Models (nanotwincu3 model as the physically rea
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu5-streamlit-red)](https://nanotwin-structurecomparison5.streamlit.app/) (theoretically inconsistent and no evolution)
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincu6-streamlit-red)](https://nanotwin-structurecomparison6.streamlit.app/) (theoretically consistent and detwinning occurs)
+
+Data Generation
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata7-streamlit-red)](https://nanotwinstructure-datagenerator7.streamlit.app/) (theoretically consistent and detwinning occurs)
