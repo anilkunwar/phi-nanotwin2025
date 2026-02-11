@@ -1802,7 +1802,8 @@ def main():
            
             # Grid parameters
             st.subheader("📊 Grid Configuration")
-            N = st.slider("Grid resolution (N×N)", 64, 512, 256, 64, key="N")
+            #N = st.slider("Grid resolution (N×N)", 64, 512, 256, 64, key="N")
+            N = st.slider("Grid resolution (N×N)", 64, 512, 128, 64, key="N")
             dx = st.slider("Grid spacing (nm)", 0.2, 2.0, 0.5, 0.1, key="dx")
             dt = st.slider("Time step (ns)", 1e-5, 1e-3, 1e-4, 1e-5, key="dt", format="%.5f")
            
