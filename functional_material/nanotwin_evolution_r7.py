@@ -1,3 +1,4 @@
+```python
 import numpy as np
 import streamlit as st
 from scipy.fft import fft2, ifft2, fftfreq
@@ -80,7 +81,8 @@ class MetadataManager:
                 'N': sim_params.get('N', 256),
                 'dx': sim_params.get('dx', 0.5),
                 'twin_spacing': sim_params.get('twin_spacing', 20.0),
-                'applied_stress': sim_params.get('applied_stress', 300e6)
+                'applied_stress': sim_params.get('applied_stress', 300e6),
+                'n_steps': sim_params.get('n_steps', 100)
             }
         }
         return metadata
@@ -534,7 +536,25 @@ class PublicationEnhancer:
         return ax
    
     @staticmethod
-    def add_scale_bar(ax, length_nm, location='lower right', color='black', linewidth=2):
+    def add_scale_bar(ax, length_nm, location='lower right', color='black', linewidth=2, fontsize=8):
+        """
+        Add scale bar to microscopy-style images.
+        
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            The axes to add the scale bar to.
+        length_nm : float
+            Length of the scale bar in nanometers.
+        location : str
+            Position of the scale bar: 'lower right', 'lower left', 'upper right', 'upper left'.
+        color : str
+            Color of the scale bar line and text.
+        linewidth : float
+            Width of the scale bar line.
+        fontsize : int or float
+            Font size of the scale bar label.
+        """
         if location == 'lower right':
             x_pos = 0.95; y_pos = 0.05; ha = 'right'; va = 'bottom'
         elif location == 'lower left':
@@ -555,7 +575,7 @@ class PublicationEnhancer:
                color=color, linewidth=linewidth, solid_capstyle='butt')
         ax.text((bar_x_start + bar_x_end) / 2, bar_y + y_range * 0.02,
                f'{length_nm} nm', ha='center', va='bottom',
-               color=color, fontsize=8, fontweight='bold')
+               color=color, fontsize=fontsize, fontweight='bold')
         return ax
 
 # ============================================================================
@@ -1017,7 +1037,19 @@ class EnhancedTwinVisualizer:
 
     @handle_errors
     def create_multi_field_comparison(self, results_dict, style_params=None):
-        """Create publication-quality multi-field comparison plot"""
+        """
+        Create publication-quality multi-field comparison plot.
+        
+        Parameters
+        ----------
+        results_dict : dict
+            Dictionary containing field arrays (phi, sigma_eq, h, etc.)
+        style_params : dict, optional
+            Styling parameters including:
+            - 'scalebar_color' : str, color of scale bar
+            - 'scalebar_fontsize' : int, font size of scale bar label
+            - plus colormap keys etc.
+        """
         if style_params is None:
             style_params = {}
        
@@ -1086,8 +1118,15 @@ class EnhancedTwinVisualizer:
             elif field_name == 'h':
                 cbar.set_label('Spacing (nm)')
            
+            # Add scale bar with customizable color and font size
             if field_name in ['phi', 'sigma_eq']:
-                PublicationEnhancer.add_scale_bar(ax, 10.0, 'lower right')
+                scalebar_color = style_params.get('scalebar_color', 'black')
+                scalebar_fontsize = style_params.get('scalebar_fontsize', 8)
+                PublicationEnhancer.add_scale_bar(
+                    ax, 10.0, 'lower right',
+                    color=scalebar_color,
+                    fontsize=scalebar_fontsize
+                )
        
         for idx in range(n_fields, rows*cols):
             row = idx // cols
@@ -1722,7 +1761,8 @@ def main():
     • Metadata management • Journal‑style figures • 50+ colormaps • Error handling decorator<br>
     • Full simulation database (save/delete/compare) • Global cache management • Single‑simulation viewer with animation<br>
     • Side‑by‑side heatmaps • Overlay line profiles • Statistical summary • Individual PKL/PT/SQL/CSV/JSON downloads with symbols (λ, W)<br>
-    • Bulk export of all simulations • Debug panel • Publication‑ready styling
+    • Bulk export of all simulations • Debug panel • Publication‑ready styling<br>
+    • <span style="color: green;">NEW:</span> Customizable scale bar (color + font size)
     </div>
     """, unsafe_allow_html=True)
    
@@ -1814,15 +1854,22 @@ def main():
                 enable_monitoring = st.checkbox("Enable real-time monitoring", True)
                 auto_adjust_dt = st.checkbox("Auto-adjust time step", True)
            
-            # Visualization settings (global + per-sim)
+            # ================================================================
+            # Visualization settings (including scale bar customization)
+            # ================================================================
             st.subheader("🎨 Visualization Settings")
-            # Global colormaps (affect all plots unless overridden)
+            # Global colormaps
             global_cmap_phi = st.selectbox("Global φ colormap", cmap_list, index=cmap_list.index('RdBu_r') if 'RdBu_r' in cmap_list else 0)
             global_cmap_stress = st.selectbox("Global σ_eq colormap", cmap_list, index=cmap_list.index('hot') if 'hot' in cmap_list else 0)
            
             # Per-simulation overrides
             sim_cmap_phi = st.selectbox("Simulation-specific φ colormap", cmap_list, index=cmap_list.index(global_cmap_phi) if global_cmap_phi in cmap_list else 0)
             sim_cmap_stress = st.selectbox("Simulation-specific σ_eq colormap", cmap_list, index=cmap_list.index(global_cmap_stress) if global_cmap_stress in cmap_list else 0)
+           
+            # Scale bar customization
+            st.subheader("📏 Scale Bar Settings")
+            scalebar_color = st.color_picker("Scale bar color", "#000000")
+            scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1)
            
             # Initialize button
             if st.button("🚀 Initialize Simulation", type="primary", use_container_width=True):
@@ -1834,12 +1881,15 @@ def main():
                     'twin_spacing': twin_spacing, 'grain_boundary_pos': grain_boundary_pos,
                     'geometry_type': 'defect' if geometry_type == "Twin Grain with Defect" else 'standard',
                     'applied_stress': applied_stress_MPa * 1e6,
+                    'n_steps': n_steps,           # <-- FIX: add n_steps to params
                     'save_frequency': save_frequency,
                     'stability_factor': stability_factor,
                     'cmap_phi': sim_cmap_phi,
                     'cmap_stress': sim_cmap_stress,
                     'global_cmap_phi': global_cmap_phi,
-                    'global_cmap_stress': global_cmap_stress
+                    'global_cmap_stress': global_cmap_stress,
+                    'scalebar_color': scalebar_color,
+                    'scalebar_fontsize': scalebar_fontsize
                 }
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
@@ -2024,7 +2074,7 @@ def main():
                            
                             im = ax.imshow(data_disp, extent=visualizer.extent, cmap=cmap,
                                           origin='lower', aspect='equal')
-                            ax.set_title(f"{sim.get('params', {}).get('twin_spacing', 0):.1f}nm, {sim.get('params', {}).get('applied_stress', 0)/1e6:.0f}MPa",
+                            ax.set_title(f"λ={sim['params'].get('twin_spacing', 0):.1f}nm, σ={sim['params'].get('applied_stress', 0)/1e6:.0f}MPa",
                                        fontsize=9)
                             ax.set_xlabel('x (nm)')
                             ax.set_ylabel('y (nm)')
@@ -2278,11 +2328,13 @@ def main():
                 # Get current frame
                 results = history[frame_idx]
                
-                # Visualize using enhanced visualizer
+                # Visualize using enhanced visualizer, passing scale bar settings
                 visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
+                    'scalebar_color': params.get('scalebar_color', 'black'),
+                    'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
                 fig = visualizer.create_multi_field_comparison(results, style_params)
                 st.pyplot(fig)
@@ -2321,8 +2373,15 @@ def main():
             phi_gx, phi_gy = compute_gradients_numba(phi, dx)
             h = compute_twin_spacing_numba(phi_gx, phi_gy)
             initial_results = {'phi': phi, 'eta1': eta1, 'h': h}
-            fig = visualizer.create_multi_field_comparison(initial_results)
+           
+            # Use style parameters including scale bar settings
+            style_params = {
+                'scalebar_color': params.get('scalebar_color', 'black'),
+                'scalebar_fontsize': params.get('scalebar_fontsize', 10)
+            }
+            fig = visualizer.create_multi_field_comparison(initial_results, style_params)
             st.pyplot(fig)
+            plt.close(fig)
            
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -2410,9 +2469,12 @@ def main():
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
+                    'scalebar_color': params.get('scalebar_color', 'black'),
+                    'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
                 fig = visualizer.create_multi_field_comparison(results, style_params)
                 st.pyplot(fig)
+                plt.close(fig)
                
                 st.subheader("Convergence Monitoring")
                 if hasattr(st.session_state, 'solver') and st.session_state.solver.history['phi_norm']:
@@ -2422,6 +2484,7 @@ def main():
                         full_timesteps
                     )
                     st.pyplot(conv_fig)
+                    plt.close(conv_fig)
             else:
                 st.info("Run a simulation first.")
        
@@ -2612,3 +2675,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
