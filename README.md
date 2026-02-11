@@ -28,3 +28,5 @@ Engineering Design with Advanced Models (nanotwincu3 model as the physically rea
 Data Generation
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata7-streamlit-red)](https://nanotwinstructure-datagenerator7.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is unrealistic, visualization need to be improved)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata8-streamlit-red)](https://nanotwinstructure-datagenerator8.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved)
