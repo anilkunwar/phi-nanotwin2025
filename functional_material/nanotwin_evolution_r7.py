@@ -1,4 +1,3 @@
-```python
 import numpy as np
 import streamlit as st
 from scipy.fft import fft2, ifft2, fftfreq
@@ -2675,4 +2674,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
