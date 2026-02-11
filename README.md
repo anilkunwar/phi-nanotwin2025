@@ -21,4 +21,6 @@ Model Development
 
 Engineering Design with Advanced Models (nanotwincu3 model as the physically realistic base model)
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu5-streamlit-red)](https://nanotwin-structurecomparison5.streamlit.app/)
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu5-streamlit-red)](https://nanotwin-structurecomparison5.streamlit.app/) (theoretically inconsistent and no evolution)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincu5-streamlit-red)](https://nanotwin-structurecomparison5.streamlit.app/) (theoretically consistent and detwinning occurs)
