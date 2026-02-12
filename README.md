@@ -38,3 +38,6 @@ Data Generation
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata11-streamlit-red)](https://nanotwinstructure-datagenerator11.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved)
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata12-streamlit-red)](https://nanotwinstructure-datagenerator12.streamlit.app/) ( variable distance between the ITB and GB, planar and curved GB interface)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata13-streamlit-red)](https://nanotwinstructure-datagenerator13.streamlit.app/) ( variable distance between the ITB and GB (right) and ITB and left edge, planar and curved GB interface, interactive visualization)
+
