@@ -33,6 +33,6 @@ Data Generation
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata9-streamlit-red)](https://nanotwinstructure-datagenerator9.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved)
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata10-streamlit-red)](https://nanotwinstructure-datagenerator10.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved)
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata10-streamlit-red)](https://nanotwinstructure-datagenerator10.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved, does not evolve at 256 grid resolution but evolves at lower grid resolution)
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata11-streamlit-red)](https://nanotwinstructure-datagenerator11.streamlit.app/) (theoretically consistent and detwinning occurs, the computation of plastic strain is realistic, visualization need to be improved)
