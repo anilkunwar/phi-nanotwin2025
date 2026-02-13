@@ -5,7 +5,7 @@ from numba import njit, prange
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib import rcParams
-from matplotlib.ticker import AutoMinorLocator, MultipleLocator, FormatStrFormatter, ScalarFormatter
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator, FormatStrFormatter
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
@@ -65,7 +65,7 @@ class MetadataManager:
                 'sigma_eq': sim_params.get('cmap_stress', 'hot'),
                 'sigma_h': sim_params.get('cmap_hydro', 'RdBu'),
                 'h': sim_params.get('cmap_h', 'plasma'),
-                'eta1': sim_params.get('cmap_eta1', 'Reds')      # NEW: store eta1 colormap
+                'eta1': sim_params.get('cmap_eta1', 'Reds')
             },
             'material_properties': {
                 'C11': 168.4e9,
@@ -119,7 +119,7 @@ class MetadataManager:
                 'sigma_eq': 'hot',
                 'sigma_h': 'RdBu',
                 'h': 'plasma',
-                'eta1': 'Reds'      # NEW: default for eta1
+                'eta1': 'Reds'
             }
         
         return metadata
@@ -1135,7 +1135,7 @@ class EnhancedTwinVisualizer:
     def create_multi_field_comparison(self, results_dict, style_params=None):
         """
         Create publication-quality multi-field comparison plot.
-        Now includes hydrostatic stress and grain order parameter eta1.
+        Now includes hydrostatic stress visualization and physically accurate twin boundary contours.
         """
         if style_params is None:
             style_params = {}
@@ -1152,7 +1152,7 @@ class EnhancedTwinVisualizer:
             'h_cmap': 'plasma',
             'eps_p_mag_cmap': 'YlOrRd',
             'sigma_y_cmap': 'viridis',
-            'eta1_cmap': 'Reds',          # NEW: default colormap for eta1
+            'eta1_cmap': 'Reds',
         }
         for k, v in defaults.items():
             style_params.setdefault(k, v)
@@ -1162,10 +1162,8 @@ class EnhancedTwinVisualizer:
         label_font_size = float(style_params['label_font_size'])
         scalebar_fontsize = float(style_params['scalebar_fontsize'])
        
-        # MODIFIED: added eta1 to fields_to_plot
         fields_to_plot = [
             ('phi', 'Twin Order Parameter φ', style_params['phi_cmap'], [-1.2, 1.2]),
-            ('eta1', 'Grain Order Parameter η₁', style_params['eta1_cmap'], [0, 1]),   # NEW
             ('sigma_eq', 'Von Mises Stress (GPa)', style_params['sigma_eq_cmap'], None),
             ('sigma_h', 'Hydrostatic Stress (GPa)', style_params['sigma_h_cmap'], None),
             ('h', 'Twin Spacing (nm)', style_params['h_cmap'], [0, 30]),
@@ -1217,10 +1215,20 @@ class EnhancedTwinVisualizer:
                           vmin=vmin, vmax=vmax, origin='lower', aspect='equal',
                           interpolation='bilinear')
            
-            if field_name == 'phi':
+            # [ENHANCEMENT] Only draw twin boundary contours (φ=0) where the twinned grain actually exists
+            if field_name == 'phi' and 'eta1' in results_dict:
+                # Create masked array: mask regions outside the twin grain (eta1 ≤ 0.5)
+                eta1 = results_dict['eta1']
+                phi_masked = np.ma.masked_where(eta1 <= 0.5, results_dict['phi'])
+                # Draw contour only on the masked data; no contours appear outside the grain
                 ax.contour(np.linspace(self.extent[0], self.extent[1], self.N),
                           np.linspace(self.extent[2], self.extent[3], self.N),
-                          data, levels=[0], colors='white', linewidths=1, alpha=0.8)
+                          phi_masked, levels=[0], colors='white', linewidths=1, alpha=0.8)
+            elif field_name == 'phi':
+                # Fallback if eta1 not available – contour the whole field
+                ax.contour(np.linspace(self.extent[0], self.extent[1], self.N),
+                          np.linspace(self.extent[2], self.extent[3], self.N),
+                          results_dict['phi'], levels=[0], colors='white', linewidths=1, alpha=0.8)
            
             ax.set_title(title, fontsize=title_font_size)
             ax.set_xlabel('x (nm)', fontsize=label_font_size)
@@ -1233,16 +1241,11 @@ class EnhancedTwinVisualizer:
                 cbar.set_label('Stress (GPa)')
             elif field_name == 'sigma_y':
                 cbar.set_label('Stress (MPa)')
-                # FIX: use plain formatting to avoid scientific notation
-                cbar.ax.yaxis.set_major_formatter(ScalarFormatter(useOffset=False, useMathText=False))
-                cbar.ax.ticklabel_format(style='plain', axis='y')
             elif field_name == 'h':
                 cbar.set_label('Spacing (nm)')
-            elif field_name == 'eta1':
-                cbar.set_label('η₁')
            
             # Add scale bar with customizable color and font size
-            if field_name in ['phi', 'sigma_eq', 'sigma_h', 'eta1']:   # added eta1
+            if field_name in ['phi', 'sigma_eq', 'sigma_h']:
                 PublicationEnhancer.add_scale_bar(
                     ax, 10.0, 'lower right',
                     color=style_params['scalebar_color'],
@@ -1261,8 +1264,11 @@ class EnhancedTwinVisualizer:
     # Plotly 2D Interactive Visualization
     # ========================================================================
     @handle_errors
-    def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0):
-        """Create an interactive Plotly heatmap for a given field."""
+    def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0, mask_twin_boundary=True):
+        """
+        Create an interactive Plotly heatmap for a given field.
+        If mask_twin_boundary is True, the twin boundary contour is drawn only inside the twinned grain.
+        """
         if field_name not in results_dict:
             return None
        
@@ -1300,11 +1306,15 @@ class EnhancedTwinVisualizer:
             hovertemplate='x: %{x:.1f} nm<br>y: %{y:.1f} nm<br>%{z:.3f}<extra></extra>'
         ))
        
-        # Add twin boundary contour (φ=0) if field is not φ itself
+        # [ENHANCEMENT] Add twin boundary contour (φ=0) only inside the twinned grain if mask_twin_boundary=True
         if field_name != 'phi' and 'phi' in results_dict:
-            phi_data = results_dict['phi']
+            phi = results_dict['phi'].copy()
+            if mask_twin_boundary and 'eta1' in results_dict:
+                # Set phi to NaN outside the twin grain so contour is not drawn there
+                phi[results_dict['eta1'] <= 0.5] = np.nan
+           
             fig.add_trace(go.Contour(
-                z=phi_data,
+                z=phi,
                 x=np.linspace(self.extent[0], self.extent[1], self.N),
                 y=np.linspace(self.extent[2], self.extent[3], self.N),
                 contours=dict(
@@ -1364,7 +1374,7 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ========================================================================
-    # NEW: 3D Interactive Surface Visualization (Plotly)
+    # 3D Interactive Surface Visualization (Plotly)
     # ========================================================================
     @handle_errors
     def create_plotly_3d_surface(self, results_dict, field_name, frame_idx=0):
@@ -2017,8 +2027,7 @@ class DataExporter:
                             'phi': frame['phi'].flatten(),
                             'sigma_eq_GPa': (frame['sigma_eq']/1e9).flatten(),
                             'sigma_h_GPa': (frame['sigma_h']/1e9).flatten(),
-                            'h_nm': frame['h'].flatten(),
-                            'eta1': frame['eta1'].flatten()   # NEW: export eta1
+                            'h_nm': frame['h'].flatten()
                         })
                         zf.writestr(f"{sim_dir}/frame_{idx:04d}.csv", df.to_csv(index=False))
                    
@@ -2075,8 +2084,7 @@ def main():
     <strong>✅ NEW FEATURES:</strong><br>
     • <span style="color: green;">LEFT BUFFER ZONE:</span> User‑controlled twin‑free region near the left domain edge (0–20 nm).<br>
     • <span style="color: green;">3D INTERACTIVE SURFACES:</span> Rotatable 3D plots of stress, strain, and order parameters.<br>
-    • <span style="color: green;">GRAIN ORDER PARAMETER η₁:</span> Now visualized in the main multi‑field comparison plot.<br>
-    • <span style="color: green;">IMPROVED YIELD STRESS COLORBAR:</span> Displays plain numbers (MPa) without scientific notation.<br>
+    • <span style="color: green;">PHYSICAL TWIN BOUNDARY CONTOURS:</span> White contour lines only drawn inside the actual twinned grain (no spurious lines in buffers or defects).<br>
     • Full compatibility with existing analysis, database, and export.
     </div>
     """, unsafe_allow_html=True)
@@ -2182,7 +2190,7 @@ def main():
                 auto_adjust_dt = st.checkbox("Auto-adjust time step", True)
            
             # ================================================================
-            # Visualization settings (including scale bar customization)
+            # Visualization settings (including physical contour masking)
             # ================================================================
             st.subheader("🎨 Visualization Settings")
             # Global colormaps
@@ -2194,13 +2202,16 @@ def main():
             sim_cmap_phi = st.selectbox("Simulation-specific φ colormap", cmap_list, index=cmap_list.index(global_cmap_phi) if global_cmap_phi in cmap_list else 0)
             sim_cmap_stress = st.selectbox("Simulation-specific σ_eq colormap", cmap_list, index=cmap_list.index(global_cmap_stress) if global_cmap_stress in cmap_list else 0)
             sim_cmap_hydro = st.selectbox("Simulation-specific σ_h colormap", cmap_list, index=cmap_list.index(global_cmap_hydro) if global_cmap_hydro in cmap_list else 0)
-            # NEW: colormap for eta1
-            sim_cmap_eta1 = st.selectbox("Simulation-specific η₁ colormap", cmap_list, index=cmap_list.index('Reds') if 'Reds' in cmap_list else 0)
            
             # Scale bar customization
             st.subheader("📏 Scale Bar Settings")
             scalebar_color = st.color_picker("Scale bar color", "#000000")
             scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1)
+           
+            # [ENHANCEMENT] User control for physical twin boundary masking
+            st.subheader("🧪 Twin Boundary Contours")
+            mask_twin_contours = st.checkbox("Only draw contours inside the twinned grain (physical)", value=True,
+                                            help="When checked, the white contour lines (φ=0) will only appear inside the twin grain (eta1 > 0.5). This removes spurious lines from buffers and defects.")
            
             # Initialize button
             if st.button("🚀 Initialize Simulation", type="primary", use_container_width=True):
@@ -2224,12 +2235,12 @@ def main():
                     'cmap_phi': sim_cmap_phi,
                     'cmap_stress': sim_cmap_stress,
                     'cmap_hydro': sim_cmap_hydro,
-                    'cmap_eta1': sim_cmap_eta1,      # NEW: store eta1 colormap
                     'global_cmap_phi': global_cmap_phi,
                     'global_cmap_stress': global_cmap_stress,
                     'global_cmap_hydro': global_cmap_hydro,
                     'scalebar_color': scalebar_color,
-                    'scalebar_fontsize': scalebar_fontsize
+                    'scalebar_fontsize': scalebar_fontsize,
+                    'mask_twin_contours': mask_twin_contours   # Store user preference
                 }
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
@@ -2290,11 +2301,11 @@ def main():
                
                 field_to_compare = st.selectbox(
                     "Field to Compare",
-                    ["phi (Twin Order)", "eta1 (Grain Order)", "sigma_eq (Von Mises Stress)", 
-                     "sigma_h (Hydrostatic Stress)", "h (Twin Spacing)", "sigma_y (Yield Stress)"],
+                    ["phi (Twin Order)", "sigma_eq (Von Mises Stress)", "sigma_h (Hydrostatic Stress)",
+                     "h (Twin Spacing)", "sigma_y (Yield Stress)"],
                     index=1
                 )
-                field_key = field_to_compare.split()[0]  # 'phi', 'eta1', etc.
+                field_key = field_to_compare.split()[0]  # 'phi', 'sigma_eq', etc.
                
                 if comparison_type == "Overlay Line Profiles":
                     profile_direction = st.selectbox(
@@ -2437,13 +2448,12 @@ def main():
                 # Get current frame
                 results = history[frame_idx]
                
-                # Visualize using enhanced visualizer
+                # Visualize using enhanced visualizer (physical contour masking uses stored preference)
                 visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
                     'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
-                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),   # NEW: pass eta1 colormap
                     'scalebar_color': params.get('scalebar_color', 'black'),
                     'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
@@ -2465,7 +2475,7 @@ def main():
    
     elif operation_mode == "Run New Simulation" and 'initialized' in st.session_state:
         # ----------------------------------------------
-        # RUN NEW SIMULATION - TABBED INTERFACE (WITH NEW 3D TAB)
+        # RUN NEW SIMULATION - TABBED INTERFACE (WITH NEW 3D TAB AND PHYSICAL CONTOUR TOGGLE)
         # ----------------------------------------------
         params = st.session_state.initial_geometry['params']
         N = params['N']; dx = params['dx']
@@ -2485,10 +2495,9 @@ def main():
            
             phi_gx, phi_gy = compute_gradients_numba(phi, dx)
             h = compute_twin_spacing_numba(phi_gx, phi_gy)
-            initial_results = {'phi': phi, 'eta1': eta1, 'h': h}   # include eta1 for visualization
+            initial_results = {'phi': phi, 'eta1': eta1, 'h': h}
            
             style_params = {
-                'eta1_cmap': params.get('cmap_eta1', 'Reds'),      # NEW
                 'scalebar_color': params.get('scalebar_color', 'black'),
                 'scalebar_fontsize': params.get('scalebar_fontsize', 10)
             }
@@ -2583,7 +2592,6 @@ def main():
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
                     'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
-                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),   # NEW
                     'scalebar_color': params.get('scalebar_color', 'black'),
                     'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
@@ -2621,7 +2629,7 @@ def main():
                 with col2:
                     field_to_profile = st.selectbox(
                         "Field to Profile",
-                        ["phi", "eta1", "sigma_eq", "sigma_h", "h", "sigma_y"],   # added eta1
+                        ["phi", "sigma_eq", "sigma_h", "h", "sigma_y"],
                         index=1
                     )
                
@@ -2669,14 +2677,17 @@ def main():
                
                 plotly_field = st.selectbox(
                     "Select field to visualize",
-                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],   # added eta1
+                    ["phi", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
                     index=0, key="plotly_2d_field"
                 )
                 frame_idx_plotly = st.slider("Frame", 0, len(results_history)-1, len(results_history)-1,
                                              key="plotly_2d_frame")
                 results = results_history[frame_idx_plotly]
                
-                fig_heatmap = visualizer.create_plotly_heatmap(results, plotly_field, frame_idx_plotly)
+                # [ENHANCEMENT] Use the user's contour masking preference
+                mask_contours = params.get('mask_twin_contours', True)
+                fig_heatmap = visualizer.create_plotly_heatmap(results, plotly_field, frame_idx_plotly,
+                                                              mask_twin_boundary=mask_contours)
                 if fig_heatmap:
                     st.plotly_chart(fig_heatmap, use_container_width=True)
                
@@ -2717,7 +2728,7 @@ def main():
                 # Field selector for 3D
                 field_3d = st.selectbox(
                     "Select field for 3D surface",
-                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],   # added eta1
+                    ["phi", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
                     index=1, key="3d_field"
                 )
                
