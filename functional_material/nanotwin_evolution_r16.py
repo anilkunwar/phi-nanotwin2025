@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib import rcParams
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator, FormatStrFormatter
+import matplotlib.animation as animation
+from PIL import Image
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
@@ -22,22 +24,34 @@ from io import BytesIO, StringIO
 import tempfile
 import os
 import pandas as pd
+import logging
+
+# Optional HDF5 export
+try:
+    import h5py
+    H5PY_AVAILABLE = True
+except ImportError:
+    H5PY_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # ERROR HANDLING DECORATOR
 # ============================================================================
 def handle_errors(func):
-    """Decorator to handle errors gracefully"""
+    """Decorator to handle errors gracefully and log them."""
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            st.error(f"❌ Error in {func.__name__}: {str(e)}")
+            error_msg = f"❌ Error in {func.__name__}: {str(e)}"
+            st.error(error_msg)
             st.error("Please check the console for detailed error information.")
-            print(f"Error in {func.__name__}: {str(e)}")
-            print(traceback.format_exc())
+            logger.error(f"{error_msg}\n{traceback.format_exc()}")
             return None
     return wrapper
 
@@ -67,21 +81,14 @@ class MetadataManager:
                 'h': sim_params.get('cmap_h', 'plasma'),
                 'eta1': sim_params.get('cmap_eta1', 'Reds')
             },
-            'material_properties': {
-                'C11': 168.4e9,
-                'C12': 121.4e9,
-                'C44': 75.4e9,
-                'gamma_tw': 1/np.sqrt(2),
-                'b': 0.256e-9,
-                'mu': 48e9,
-                'nu': 0.34
-            },
+            'material_properties': sim_params.get('material_properties', {}),
             'simulation_parameters': {
                 'dt': sim_params.get('dt', 1e-4),
                 'N': sim_params.get('N', 256),
                 'dx': sim_params.get('dx', 0.5),
                 'twin_spacing': sim_params.get('twin_spacing', 20.0),
                 'applied_stress': sim_params.get('applied_stress', 300e6),
+                'applied_stress_angle': sim_params.get('applied_stress_angle', 0.0),
                 'n_steps': sim_params.get('n_steps', 100)
             }
         }
@@ -454,7 +461,7 @@ class EnhancedLineProfiler:
                
                 if 0 <= x < nx-1 and 0 <= y < ny-1:
                     x0, y0 = int(x), int(y)
-                    x1, y1 = x0 + 1, y0 + 1
+                    x1, y1 = x0 + 1, y1 + 1
                    
                     if x1 >= nx: x1 = nx - 1
                     if y1 >= ny: y1 = ny - 1
@@ -661,7 +668,7 @@ class SimulationDatabase:
             try:
                 params = sim_data.get('params', {})
                 metadata = sim_data.get('metadata', {})
-                name = f"λ={params.get('twin_spacing', 0):.1f}nm | σ={params.get('applied_stress', 0)/1e6:.0f}MPa | W={params.get('W', 0):.1f}"
+                name = f"λ={params.get('twin_spacing', 0):.1f}nm | σ={params.get('applied_stress', 0)/1e6:.0f}MPa | θ={params.get('applied_stress_angle', 0):.0f}° | W={params.get('W', 0):.1f}"
                 simulations.append({
                     'id': sim_id,
                     'name': name,
@@ -703,7 +710,7 @@ def fmt_num_trim(x, ndigits=3):
 def build_sim_name(params: dict, sim_id: str = None) -> str:
     """
     Build a filename-friendly simulation name with symbols.
-    Example: twin_lambda_20.0_W_2.0_stress_300MPa_standard_twin_grain_a1b2c3
+    Example: twin_lambda_20.0_W_2.0_stress_300MPa_theta_45_standard_twin_grain_a1b2c3
     """
     try:
         geom_type = params.get("geometry_type", "standard")
@@ -716,8 +723,9 @@ def build_sim_name(params: dict, sim_id: str = None) -> str:
         twin_spacing = fmt_num_trim(params.get("twin_spacing", 20.0), ndigits=1)
         W = fmt_num_trim(params.get("W", 2.0), ndigits=1)
         stress_mpa = fmt_num_trim(params.get("applied_stress", 300e6)/1e6, ndigits=0)
+        theta = fmt_num_trim(params.get("applied_stress_angle", 0.0), ndigits=0)
        
-        name = f"twin_lambda_{twin_spacing}_W_{W}_stress_{stress_mpa}MPa_{geom_token}"
+        name = f"twin_lambda_{twin_spacing}_W_{W}_stress_{stress_mpa}MPa_theta_{theta}_{geom_token}"
         if sim_id:
             name = f"{name}_{sim_id}"
         return name
@@ -862,9 +870,11 @@ def compute_plastic_strain_numba(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy
 # ENHANCED PHYSICS MODELS WITH ERROR HANDLING
 # ============================================================================
 class MaterialProperties:
-    """Enhanced material properties database with validation"""
+    """Enhanced material properties database with validation and multiple materials."""
+    
     @staticmethod
     def get_cu_properties():
+        """Copper (Cu) - default"""
         return {
             'elastic': {
                 'C11': 168.4e9,
@@ -889,6 +899,75 @@ class MaterialProperties:
                 'rho0': 1e12,
             }
         }
+    
+    @staticmethod
+    def get_al_properties():
+        """Aluminum (Al)"""
+        return {
+            'elastic': {
+                'C11': 106.8e9,
+                'C12': 60.4e9,
+                'C44': 28.3e9,
+                'source': 'J. Appl. Phys. 88, 3287 (2000)'
+            },
+            'twinning': {
+                'gamma_tw': 1/np.sqrt(2),   # same geometry
+                'n_111': np.array([1, 1, 1])/np.sqrt(3),
+                'a_112': np.array([1, 1, -2])/np.sqrt(6),
+                'n_2d': np.array([1/np.sqrt(2), 1/np.sqrt(2)]),
+                'a_2d': np.array([1/np.sqrt(2), -1/np.sqrt(2)])
+            },
+            'plasticity': {
+                'mu': 26e9,
+                'nu': 0.33,
+                'b': 0.286e-9,
+                'sigma0': 30e6,
+                'gamma0_dot': 1e-3,
+                'm': 20,
+                'rho0': 1e12,
+            }
+        }
+    
+    @staticmethod
+    def get_ni_properties():
+        """Nickel (Ni)"""
+        return {
+            'elastic': {
+                'C11': 246.5e9,
+                'C12': 147.3e9,
+                'C44': 124.7e9,
+                'source': 'Phys. Rev. B 94, 014110 (2016)'
+            },
+            'twinning': {
+                'gamma_tw': 1/np.sqrt(2),
+                'n_111': np.array([1, 1, 1])/np.sqrt(3),
+                'a_112': np.array([1, 1, -2])/np.sqrt(6),
+                'n_2d': np.array([1/np.sqrt(2), 1/np.sqrt(2)]),
+                'a_2d': np.array([1/np.sqrt(2), -1/np.sqrt(2)])
+            },
+            'plasticity': {
+                'mu': 80e9,
+                'nu': 0.31,
+                'b': 0.249e-9,
+                'sigma0': 70e6,
+                'gamma0_dot': 1e-3,
+                'm': 20,
+                'rho0': 1e12,
+            }
+        }
+    
+    @staticmethod
+    @handle_errors
+    def get_material(material_name='Cu'):
+        """Return properties for the selected material."""
+        if material_name == 'Cu':
+            return MaterialProperties.get_cu_properties()
+        elif material_name == 'Al':
+            return MaterialProperties.get_al_properties()
+        elif material_name == 'Ni':
+            return MaterialProperties.get_ni_properties()
+        else:
+            return MaterialProperties.get_cu_properties()
 
     @staticmethod
     @handle_errors
@@ -1041,7 +1120,8 @@ class InitialGeometryVisualizer:
         return phi, eta1, eta2
 
 class EnhancedSpectralSolver:
-    """Enhanced spectral solver with error handling and stability improvements"""
+    """Enhanced spectral solver with error handling and stability improvements.
+       Now supports arbitrary loading direction via full stress tensor components."""
     def __init__(self, N, dx, elastic_params):
         self.N = N
         self.dx = dx
@@ -1067,7 +1147,22 @@ class EnhancedSpectralSolver:
         self.G22 = (mu_2d*(self.ky**2 + 2*self.kx**2) + lambda_2d*self.kx**2) / denom
 
     @handle_errors
-    def solve(self, eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress=0):
+    def solve(self, eigenstrain_xx, eigenstrain_yy, eigenstrain_xy,
+              applied_stress_xx=0, applied_stress_yy=0, applied_stress_xy=0):
+        """
+        Solve for stress and strain fields given eigenstrain and applied far‑field stress tensor.
+        
+        Parameters
+        ----------
+        eigenstrain_xx, eigenstrain_yy, eigenstrain_xy : np.ndarray (N,N)
+            Eigenstrain fields (transformation + plastic).
+        applied_stress_xx, applied_stress_yy, applied_stress_xy : float
+            Components of the applied macroscopic stress tensor (Pa).
+        
+        Returns
+        -------
+        sigma_eq, sxx, syy, sxy, sigma_h, eps_xx, eps_yy, eps_xy
+        """
         assert eigenstrain_xx.shape == (self.N, self.N), f"Invalid eigenstrain shape: {eigenstrain_xx.shape}"
        
         eps_xx_hat = fft2(eigenstrain_xx)
@@ -1091,9 +1186,9 @@ class EnhancedSpectralSolver:
         eps_yy = eps_yy_el + eigenstrain_yy
         eps_xy = eps_xy_el + eigenstrain_xy
        
-        sxx = applied_stress + self.C11_2d * eps_xx + self.C12_2d * eps_yy
-        syy = self.C12_2d * eps_xx + self.C11_2d * eps_yy
-        sxy = 2 * self.C44_2d * eps_xy
+        sxx = applied_stress_xx + self.C11_2d * eps_xx + self.C12_2d * eps_yy
+        syy = applied_stress_yy + self.C12_2d * eps_xx + self.C11_2d * eps_yy
+        sxy = applied_stress_xy + 2 * self.C44_2d * eps_xy
        
         sigma_eq = np.sqrt(0.5 * ((sxx - syy)**2 + (syy - 0)**2 + (0 - sxx)**2 + 6 * sxy**2))
         sigma_eq = np.clip(sigma_eq, 0, 5e9)
@@ -1104,7 +1199,7 @@ class EnhancedSpectralSolver:
         return sigma_eq, sxx, syy, sxy, sigma_h, eps_xx, eps_yy, eps_xy
 
 # ============================================================================
-# ENHANCED VISUALIZATION SYSTEM (Matplotlib + Plotly + 3D)
+# ENHANCED VISUALIZATION SYSTEM (Matplotlib + Plotly + 3D + Animations)
 # ============================================================================
 class EnhancedTwinVisualizer:
     """Comprehensive visualization system for nanotwinned simulations"""
@@ -1135,7 +1230,8 @@ class EnhancedTwinVisualizer:
     def create_multi_field_comparison(self, results_dict, style_params=None):
         """
         Create publication-quality multi-field comparison plot.
-        Now includes hydrostatic stress visualization and physically accurate twin boundary contours.
+        Now includes eta1 (grain order parameter) and hydrostatic stress.
+        Improved handling of single subplot case.
         """
         if style_params is None:
             style_params = {}
@@ -1164,6 +1260,7 @@ class EnhancedTwinVisualizer:
        
         fields_to_plot = [
             ('phi', 'Twin Order Parameter φ', style_params['phi_cmap'], [-1.2, 1.2]),
+            ('eta1', 'Grain η₁', style_params['eta1_cmap'], [0, 1]),
             ('sigma_eq', 'Von Mises Stress (GPa)', style_params['sigma_eq_cmap'], None),
             ('sigma_h', 'Hydrostatic Stress (GPa)', style_params['sigma_h_cmap'], None),
             ('h', 'Twin Spacing (nm)', style_params['h_cmap'], [0, 30]),
@@ -1171,26 +1268,27 @@ class EnhancedTwinVisualizer:
             ('sigma_y', 'Yield Stress (MPa)', style_params['sigma_y_cmap'], None),
         ]
        
-        n_fields = len(fields_to_plot)
+        # Filter fields that actually exist in results_dict
+        available_fields = [(fname, title, cmap, vrange) for fname, title, cmap, vrange in fields_to_plot 
+                           if fname in results_dict]
+        n_fields = len(available_fields)
+        
+        if n_fields == 0:
+            return None
+        
         cols = min(3, n_fields)
         rows = (n_fields + cols - 1) // cols
        
-        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3.5*rows))
        
+        # Flatten axes for easy indexing
         if rows == 1 and cols == 1:
-            axes = np.array([[axes]])
-        elif rows == 1:
-            axes = axes.reshape(1, -1)
-        elif cols == 1:
-            axes = axes.reshape(-1, 1)
+            axes = np.array([axes])
+        else:
+            axes = axes.flatten()
        
-        for idx, (field_name, title, default_cmap, vrange) in enumerate(fields_to_plot):
-            if field_name not in results_dict:
-                continue
-               
-            row = idx // cols
-            col = idx % cols
-            ax = axes[row, col]
+        for idx, (field_name, title, default_cmap, vrange) in enumerate(available_fields):
+            ax = axes[idx]
            
             data = results_dict[field_name]
             if field_name in ['sigma_eq', 'sigma_h']:
@@ -1215,20 +1313,10 @@ class EnhancedTwinVisualizer:
                           vmin=vmin, vmax=vmax, origin='lower', aspect='equal',
                           interpolation='bilinear')
            
-            # [ENHANCEMENT] Only draw twin boundary contours (φ=0) where the twinned grain actually exists
-            if field_name == 'phi' and 'eta1' in results_dict:
-                # Create masked array: mask regions outside the twin grain (eta1 ≤ 0.5)
-                eta1 = results_dict['eta1']
-                phi_masked = np.ma.masked_where(eta1 <= 0.5, results_dict['phi'])
-                # Draw contour only on the masked data; no contours appear outside the grain
+            if field_name == 'phi':
                 ax.contour(np.linspace(self.extent[0], self.extent[1], self.N),
                           np.linspace(self.extent[2], self.extent[3], self.N),
-                          phi_masked, levels=[0], colors='white', linewidths=1, alpha=0.8)
-            elif field_name == 'phi':
-                # Fallback if eta1 not available – contour the whole field
-                ax.contour(np.linspace(self.extent[0], self.extent[1], self.N),
-                          np.linspace(self.extent[2], self.extent[3], self.N),
-                          results_dict['phi'], levels=[0], colors='white', linewidths=1, alpha=0.8)
+                          data, levels=[0], colors='white', linewidths=1, alpha=0.8)
            
             ax.set_title(title, fontsize=title_font_size)
             ax.set_xlabel('x (nm)', fontsize=label_font_size)
@@ -1245,17 +1333,16 @@ class EnhancedTwinVisualizer:
                 cbar.set_label('Spacing (nm)')
            
             # Add scale bar with customizable color and font size
-            if field_name in ['phi', 'sigma_eq', 'sigma_h']:
+            if field_name in ['phi', 'eta1', 'sigma_eq', 'sigma_h']:
                 PublicationEnhancer.add_scale_bar(
                     ax, 10.0, 'lower right',
                     color=style_params['scalebar_color'],
                     fontsize=scalebar_fontsize
                 )
        
-        for idx in range(n_fields, rows*cols):
-            row = idx // cols
-            col = idx % cols
-            axes[row, col].axis('off')
+        # Turn off unused axes
+        for idx in range(n_fields, len(axes)):
+            axes[idx].axis('off')
        
         plt.tight_layout()
         return fig
@@ -1264,11 +1351,8 @@ class EnhancedTwinVisualizer:
     # Plotly 2D Interactive Visualization
     # ========================================================================
     @handle_errors
-    def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0, mask_twin_boundary=True):
-        """
-        Create an interactive Plotly heatmap for a given field.
-        If mask_twin_boundary is True, the twin boundary contour is drawn only inside the twinned grain.
-        """
+    def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0):
+        """Create an interactive Plotly heatmap for a given field."""
         if field_name not in results_dict:
             return None
        
@@ -1288,6 +1372,9 @@ class EnhancedTwinVisualizer:
         if field_name == 'phi':
             colorscale = 'RdBu'
             zmid = 0
+        elif field_name == 'eta1':
+            colorscale = 'Reds'
+            zmid = None
         elif field_name in ['sigma_eq', 'sigma_h']:
             colorscale = 'Viridis' if field_name == 'sigma_eq' else 'RdBu'
             zmid = 0 if field_name == 'sigma_h' else None
@@ -1306,15 +1393,11 @@ class EnhancedTwinVisualizer:
             hovertemplate='x: %{x:.1f} nm<br>y: %{y:.1f} nm<br>%{z:.3f}<extra></extra>'
         ))
        
-        # [ENHANCEMENT] Add twin boundary contour (φ=0) only inside the twinned grain if mask_twin_boundary=True
+        # Add twin boundary contour (φ=0) if field is not φ itself
         if field_name != 'phi' and 'phi' in results_dict:
-            phi = results_dict['phi'].copy()
-            if mask_twin_boundary and 'eta1' in results_dict:
-                # Set phi to NaN outside the twin grain so contour is not drawn there
-                phi[results_dict['eta1'] <= 0.5] = np.nan
-           
+            phi_data = results_dict['phi']
             fig.add_trace(go.Contour(
-                z=phi,
+                z=phi_data,
                 x=np.linspace(self.extent[0], self.extent[1], self.N),
                 y=np.linspace(self.extent[2], self.extent[3], self.N),
                 contours=dict(
@@ -1374,7 +1457,7 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ========================================================================
-    # 3D Interactive Surface Visualization (Plotly)
+    # NEW: 3D Interactive Surface Visualization (Plotly)
     # ========================================================================
     @handle_errors
     def create_plotly_3d_surface(self, results_dict, field_name, frame_idx=0):
@@ -1406,6 +1489,9 @@ class EnhancedTwinVisualizer:
         if field_name == 'phi':
             colorscale = 'RdBu'
             cmin, cmax = -1.2, 1.2
+        elif field_name == 'eta1':
+            colorscale = 'Reds'
+            cmin, cmax = 0, 1
         elif field_name == 'sigma_h':
             colorscale = 'RdBu'
             cmin, cmax = -np.max(np.abs(data)), np.max(np.abs(data))
@@ -1430,7 +1516,7 @@ class EnhancedTwinVisualizer:
                 xaxis_title='x (nm)',
                 yaxis_title='y (nm)',
                 zaxis_title=f'{title}{unit}',
-                camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))  # Good default view
+                camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
             ),
             width=700,
             height=600,
@@ -1438,17 +1524,110 @@ class EnhancedTwinVisualizer:
         )
         return fig
 
+    # ========================================================================
+    # NEW: Animation Export (GIF/MP4)
+    # ========================================================================
+    @handle_errors
+    def create_animation(self, history, field_name, output_format='gif', fps=5, dpi=150):
+        """
+        Create an animation of a given field over time.
+        
+        Parameters
+        ----------
+        history : list of dict
+            List of result dictionaries for each frame.
+        field_name : str
+            Which field to animate.
+        output_format : str
+            'gif' or 'mp4'.
+        fps : int
+            Frames per second.
+        dpi : int
+            Resolution of the output.
+        
+        Returns
+        -------
+        bytes : BytesIO buffer containing the animation.
+        """
+        if not history:
+            return None
+        
+        fig, ax = plt.subplots(figsize=(6, 5), dpi=dpi)
+        ax.set_xlabel('x (nm)')
+        ax.set_ylabel('y (nm)')
+        
+        # Get first frame to set up colorbar
+        first_data = history[0][field_name].copy()
+        if field_name in ['sigma_eq', 'sigma_h']:
+            first_data = first_data / 1e9
+        elif field_name == 'sigma_y':
+            first_data = first_data / 1e6
+        
+        vmin = np.percentile(first_data, 2)
+        vmax = np.percentile(first_data, 98)
+        if field_name == 'phi':
+            vmin, vmax = -1.2, 1.2
+        elif field_name == 'eta1':
+            vmin, vmax = 0, 1
+        elif field_name == 'sigma_h':
+            vmax = max(abs(vmin), abs(vmax))
+            vmin = -vmax
+        
+        im = ax.imshow(first_data, extent=self.extent, cmap=self.get_colormap('viridis'),
+                       vmin=vmin, vmax=vmax, origin='lower', interpolation='bilinear')
+        cbar = plt.colorbar(im, ax=ax)
+        
+        if field_name in ['sigma_eq', 'sigma_h']:
+            cbar.set_label('Stress (GPa)')
+        elif field_name == 'sigma_y':
+            cbar.set_label('Stress (MPa)')
+        elif field_name == 'h':
+            cbar.set_label('Spacing (nm)')
+        else:
+            cbar.set_label(field_name)
+        
+        title = ax.set_title(f"{field_name} - t = 0.000 ns")
+        
+        def update_frame(frame_idx):
+            data = history[frame_idx][field_name].copy()
+            if field_name in ['sigma_eq', 'sigma_h']:
+                data = data / 1e9
+            elif field_name == 'sigma_y':
+                data = data / 1e6
+            im.set_array(data)
+            time_ns = frame_idx * self.dt * 1e3  # assuming dt in ns? Actually dt is in ns already
+            title.set_text(f"{field_name} - t = {time_ns:.3f} ns")
+            return [im, title]
+        
+        ani = animation.FuncAnimation(fig, update_frame, frames=len(history),
+                                      interval=1000/fps, blit=True)
+        
+        buffer = BytesIO()
+        if output_format == 'gif':
+            ani.save(buffer, writer='pillow', fps=fps, dpi=dpi)
+        else:  # mp4
+            ani.save(buffer, writer='ffmpeg', fps=fps, dpi=dpi)
+        
+        plt.close(fig)
+        buffer.seek(0)
+        return buffer
+
 # ============================================================================
 # MAIN SOLVER CLASS
 # ============================================================================
 class NanotwinnedCuSolver:
-    """Main solver with comprehensive error handling"""
+    """Main solver with comprehensive error handling and arbitrary loading direction."""
     def __init__(self, params):
         self.params = params
         self.N = params['N']
         self.dx = params['dx']
         self.dt = params['dt']
-        self.mat_props = MaterialProperties.get_cu_properties()
+        
+        # Get material properties based on selected material
+        material_name = params.get('material', 'Cu')
+        self.mat_props = MaterialProperties.get_material(material_name)
+        # Store material name in params for metadata
+        self.params['material'] = material_name
        
         errors, warnings = MaterialProperties.validate_parameters(params)
         if errors:
@@ -1674,9 +1853,19 @@ class NanotwinnedCuSolver:
             return 0.0
 
     @handle_errors
-    def step(self, applied_stress):
-        """Perform one time step of the simulation"""
+    def step(self):
+        """Perform one time step of the simulation, using applied stress with angle."""
         try:
+            # Applied stress magnitude and angle
+            sigma_mag = self.params.get('applied_stress', 0.0)
+            theta_deg = self.params.get('applied_stress_angle', 0.0)
+            theta = np.deg2rad(theta_deg)
+            
+            # Decompose uniaxial tension into full 2D stress tensor
+            applied_xx = sigma_mag * np.cos(theta)**2
+            applied_yy = sigma_mag * np.sin(theta)**2
+            applied_xy = sigma_mag * np.sin(theta) * np.cos(theta)
+            
             gamma_tw = self.mat_props['twinning']['gamma_tw']
             n = self.mat_props['twinning']['n_2d']
             a = self.mat_props['twinning']['a_2d']
@@ -1690,7 +1879,8 @@ class NanotwinnedCuSolver:
             eigenstrain_xy = exy_star + self.eps_p_xy
            
             sigma_eq, sxx, syy, sxy, sigma_h, eps_xx, eps_yy, eps_xy = self.spectral_solver.solve(
-                eigenstrain_xx, eigenstrain_yy, eigenstrain_xy, applied_stress
+                eigenstrain_xx, eigenstrain_yy, eigenstrain_xy,
+                applied_xx, applied_yy, applied_xy
             )
            
             phi_gx, phi_gy = compute_gradients_numba(self.phi, self.dx)
@@ -1814,7 +2004,7 @@ class SimulationMonitor:
         return fig
 
 # ============================================================================
-# ENHANCED EXPORT FUNCTIONALITY (with individual PKL/PT/SQL/CSV/JSON)
+# ENHANCED EXPORT FUNCTIONALITY (with individual PKL/PT/SQL/CSV/JSON/HDF5)
 # ============================================================================
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder for numpy types"""
@@ -1888,6 +2078,7 @@ class DataExporter:
                      sim_name TEXT,
                      twin_spacing REAL,
                      applied_stress REAL,
+                     applied_stress_angle REAL,
                      W REAL,
                      geometry_type TEXT,
                      created_at TEXT,
@@ -1908,10 +2099,11 @@ class DataExporter:
                      )''')
        
         created_at = sim_data.get('metadata', {}).get('created_at', datetime.now().isoformat())
-        c.execute("INSERT INTO simulations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        c.execute("INSERT INTO simulations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   (sim_id, sim_name,
                    params.get('twin_spacing', 0.0),
                    params.get('applied_stress', 0.0),
+                   params.get('applied_stress_angle', 0.0),
                    params.get('W', 0.0),
                    params.get('geometry_type', 'standard'),
                    created_at,
@@ -1992,6 +2184,51 @@ class DataExporter:
    
     @staticmethod
     @handle_errors
+    def export_hdf5(sim_data, params, history, sim_name, N, dx):
+        """Export as HDF5 file (requires h5py)"""
+        if not H5PY_AVAILABLE:
+            st.error("HDF5 export requires h5py. Please install it: pip install h5py")
+            return None, None
+        
+        buffer = BytesIO()
+        with h5py.File(buffer, 'w') as f:
+            # Store parameters
+            param_grp = f.create_group('parameters')
+            for k, v in params.items():
+                if isinstance(v, (int, float, str)):
+                    param_grp.attrs[k] = v
+                elif isinstance(v, np.ndarray):
+                    param_grp.create_dataset(k, data=v)
+            
+            # Store metadata
+            meta_grp = f.create_group('metadata')
+            for k, v in sim_data.get('metadata', {}).items():
+                if isinstance(v, (int, float, str)):
+                    meta_grp.attrs[k] = v
+                elif isinstance(v, dict):
+                    subgrp = meta_grp.create_group(k)
+                    for sk, sv in v.items():
+                        subgrp.attrs[sk] = sv
+            
+            # Store grid
+            x = np.linspace(-N*dx/2, N*dx/2, N)
+            y = np.linspace(-N*dx/2, N*dx/2, N)
+            f.create_dataset('x', data=x)
+            f.create_dataset('y', data=y)
+            
+            # Store frames
+            frame_grp = f.create_group('frames')
+            for idx, frame in enumerate(history):
+                grp = frame_grp.create_group(f'frame_{idx:04d}')
+                for field in ['phi', 'eta1', 'eta2', 'sigma_eq', 'sigma_h', 'h', 'eps_p_mag', 'sigma_y']:
+                    if field in frame:
+                        grp.create_dataset(field, data=frame[field])
+        
+        buffer.seek(0)
+        return buffer, f"{sim_name}.h5"
+    
+    @staticmethod
+    @handle_errors
     def bulk_export_all_simulations(N, dx, extent):
         """Export all saved simulations as a single ZIP package"""
         all_sims = SimulationDatabase.get_all_simulations()
@@ -2035,6 +2272,7 @@ class DataExporter:
                     summary += f"  Name: {sim_name}\n"
                     summary += f"  λ = {params.get('twin_spacing', 0):.1f} nm\n"
                     summary += f"  σ_app = {params.get('applied_stress', 0)/1e6:.0f} MPa\n"
+                    summary += f"  θ = {params.get('applied_stress_angle', 0):.0f}°\n"
                     summary += f"  W = {params.get('W', 0):.1f}\n"
                     summary += f"  Frames: {len(history)}\n"
                 except Exception as e:
@@ -2045,6 +2283,95 @@ class DataExporter:
         bulk_buffer.seek(0)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         return bulk_buffer, f"twin_all_simulations_{timestamp}.zip"
+
+# ============================================================================
+# PARAMETER SWEEP MANAGER
+# ============================================================================
+class ParameterSweep:
+    """Run multiple simulations over a range of a selected parameter."""
+    
+    @staticmethod
+    @handle_errors
+    def run_sweep(base_params, param_name, values, save=True):
+        """
+        Run a parameter sweep.
+        
+        Parameters
+        ----------
+        base_params : dict
+            Base simulation parameters.
+        param_name : str
+            Name of the parameter to vary.
+        values : list
+            List of parameter values.
+        save : bool
+            Whether to save each simulation to the database.
+        
+        Returns
+        -------
+        results : list of dict
+            List of result dictionaries (convergence metrics) for each run.
+        """
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, val in enumerate(values):
+            status_text.text(f"Running {param_name} = {val:.3f} ({i+1}/{len(values)})")
+            
+            # Create a copy of base_params and update the sweep parameter
+            params = base_params.copy()
+            params[param_name] = val
+            
+            # Ensure a unique ID will be generated
+            if 'history' in params:
+                del params['history']
+            if 'geom_viz' in params:
+                del params['geom_viz']
+            
+            try:
+                # Initialize and run solver
+                solver = NanotwinnedCuSolver(params)
+                
+                # Run for n_steps, collect final results
+                n_steps = params.get('n_steps', 100)
+                for step in range(n_steps):
+                    solver.step()
+                
+                # Save final frame and history
+                final_results = {
+                    'phi': solver.phi.copy(),
+                    'eta1': solver.eta1.copy(),
+                    'eta2': solver.eta2.copy(),
+                    'sigma_eq': solver.history['avg_stress'][-1] if solver.history['avg_stress'] else 0,
+                    'max_stress': solver.history['max_stress'][-1] if solver.history['max_stress'] else 0,
+                    'plastic_work': solver.history['plastic_work'][-1] if solver.history['plastic_work'] else 0,
+                    'twin_spacing_avg': solver.history['twin_spacing_avg'][-1] if solver.history['twin_spacing_avg'] else 0,
+                    'energy': solver.history['energy'][-1] if solver.history['energy'] else 0,
+                }
+                
+                if save:
+                    # Save to database
+                    SimulationDatabase.save_simulation(params, solver.history, None)
+                
+                results.append({
+                    'param_value': val,
+                    'convergence': final_results,
+                    'solver': solver  # Keep solver if needed for further inspection
+                })
+                
+            except Exception as e:
+                st.error(f"Failed for {param_name}={val}: {e}")
+                results.append({
+                    'param_value': val,
+                    'convergence': None,
+                    'error': str(e)
+                })
+            
+            progress_bar.progress((i + 1) / len(values))
+        
+        status_text.text("Sweep completed!")
+        return results
 
 # ============================================================================
 # ENHANCED STREAMLIT APPLICATION
@@ -2082,10 +2409,12 @@ def main():
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
     <strong>✅ NEW FEATURES:</strong><br>
-    • <span style="color: green;">LEFT BUFFER ZONE:</span> User‑controlled twin‑free region near the left domain edge (0–20 nm).<br>
-    • <span style="color: green;">3D INTERACTIVE SURFACES:</span> Rotatable 3D plots of stress, strain, and order parameters.<br>
-    • <span style="color: green;">PHYSICAL TWIN BOUNDARY CONTOURS:</span> White contour lines only drawn inside the actual twinned grain (no spurious lines in buffers or defects).<br>
-    • Full compatibility with existing analysis, database, and export.
+    • <span style="color: green;">MATERIAL PRESETS:</span> Cu, Al, Ni with built‑in elastic/plastic properties.<br>
+    • <span style="color: green;">PARAMETER SWEEP:</span> Automatically run multiple simulations over any parameter range.<br>
+    • <span style="color: green;">ANIMATION EXPORT:</span> Generate GIF/MP4 videos of field evolution.<br>
+    • <span style="color: green;">HDF5 EXPORT:</span> Store full simulation data in portable HDF5 format.<br>
+    • <span style="color: green;">FULLY IMPLEMENTED COMPARISON:</span> Side‑by‑side heatmaps, overlay profiles, statistics, correlations, timelines.<br>
+    • <span style="color: green;">RESET TO DEFAULTS:</span> One‑click restore of all sidebar parameters.
     </div>
     """, unsafe_allow_html=True)
    
@@ -2104,13 +2433,28 @@ def main():
         with col2:
             if st.button("🔄 Refresh", type="secondary", help="Refresh the page"):
                 st.rerun()
+        
+        # Reset to Defaults button
+        if st.button("🔄 Reset to Defaults", type="secondary", help="Reset all parameters to default values"):
+            # Clear session state keys that are used for parameters
+            keys_to_clear = ['N', 'dx', 'dt', 'twin_spacing', 'W', 'A', 'B', 'kappa0', 'gamma_aniso',
+                            'kappa_eta', 'L_CTB', 'L_ITB', 'n_mob', 'L_eta', 'zeta', 'applied_stress',
+                            'geom_type', 'defect_type', 'defect_x', 'defect_y', 'defect_radius',
+                            'left_buffer_width', 'buffer_width', 'gb_profile', 'gb_curvature',
+                            'grain_boundary_pos', 'stability_factor', 'enable_monitoring', 'auto_adjust_dt',
+                            'n_steps', 'save_freq']
+            for k in keys_to_clear:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.success("Parameters reset to defaults!")
+            st.rerun()
        
         st.markdown("---")
        
         # Operation mode
         operation_mode = st.radio(
             "Operation Mode",
-            ["Run New Simulation", "Compare Saved Simulations", "Single Simulation View"],
+            ["Run New Simulation", "Compare Saved Simulations", "Single Simulation View", "Parameter Sweep"],
             index=0
         )
        
@@ -2120,19 +2464,23 @@ def main():
         if operation_mode == "Run New Simulation":
             st.header("🎛️ New Simulation Setup")
            
+            # Material selection
+            st.subheader("🧪 Material")
+            material_choice = st.selectbox("Select material", ["Cu", "Al", "Ni"], key="material")
+            
             # Geometry configuration
             st.subheader("🧩 Geometry Configuration")
             geometry_type = st.selectbox("Geometry Type", ["Standard Twin Grain", "Twin Grain with Defect"], key="geom_type")
            
             # Buffer zones and curved GB
-            left_buffer_width = st.slider("Left buffer width (nm)", 0.0, 20.0, 5.0, 0.5,
+            left_buffer_width = st.slider("Left buffer width (nm)", 0.0, 20.0, 5.0, 0.5, key="left_buffer_width",
                                          help="Twins start only after this distance from the left domain edge.")
-            buffer_width = st.slider("Twin‑free buffer near GB (nm)", 0.0, 20.0, 5.0, 0.5,
+            buffer_width = st.slider("Twin‑free buffer near GB (nm)", 0.0, 20.0, 5.0, 0.5, key="buffer_width",
                                      help="Twins start only after this distance from the GB.")
             gb_profile = st.selectbox("Grain Boundary Profile",
-                                      ["Plane", "Concave", "Convex"],
+                                      ["Plane", "Concave", "Convex"], key="gb_profile",
                                       help="Shape of the GB interface. Concave = curves into the twinned grain.")
-            gb_curvature = st.slider("GB Curvature Amplitude (nm)", 0.0, 20.0, 5.0, 0.5,
+            gb_curvature = st.slider("GB Curvature Amplitude (nm)", 0.0, 20.0, 5.0, 0.5, key="gb_curvature",
                                      help="Maximum deviation from the nominal GB position (for concave/convex).")
            
             # Grid parameters
@@ -2141,10 +2489,10 @@ def main():
             dx = st.slider("Grid spacing (nm)", 0.2, 2.0, 0.5, 0.1, key="dx")
             dt = st.slider("Time step (ns)", 1e-5, 1e-3, 1e-4, 1e-5, key="dt", format="%.5f")
            
-            # Material parameters
+            # Material parameters (with material-specific defaults)
             st.subheader("🔬 Material Parameters")
             twin_spacing = st.slider("Twin spacing λ (nm)", 5.0, 100.0, 20.0, 1.0, key="twin_spacing")
-            grain_boundary_pos = st.slider("Grain boundary nominal position (nm)", -50.0, 50.0, 0.0, 1.0,
+            grain_boundary_pos = st.slider("Grain boundary nominal position (nm)", -50.0, 50.0, 0.0, 1.0, key="grain_boundary_pos",
                                            help="x‑coordinate of the GB at y = 0.")
            
             if geometry_type == "Twin Grain with Defect":
@@ -2176,7 +2524,9 @@ def main():
            
             # Loading conditions
             st.subheader("🏋️ Loading Conditions")
-            applied_stress_MPa = st.slider("Applied stress σ_xx (MPa)", 0.0, 1000.0, 300.0, 10.0, key="applied_stress")
+            applied_stress_MPa = st.slider("Applied stress magnitude (MPa)", 0.0, 1000.0, 300.0, 10.0, key="applied_stress")
+            loading_angle = st.slider("Loading angle θ (deg)", 0.0, 180.0, 0.0, 5.0, key="loading_angle",
+                                     help="Direction of the uniaxial tensile stress relative to the x‑axis.")
            
             # Simulation control
             st.subheader("⏯️ Simulation Control")
@@ -2185,37 +2535,33 @@ def main():
            
             # Advanced options
             with st.expander("🔧 Advanced Options"):
-                stability_factor = st.slider("Stability factor", 0.1, 1.0, 0.5, 0.1)
-                enable_monitoring = st.checkbox("Enable real-time monitoring", True)
-                auto_adjust_dt = st.checkbox("Auto-adjust time step", True)
+                stability_factor = st.slider("Stability factor", 0.1, 1.0, 0.5, 0.1, key="stability_factor")
+                enable_monitoring = st.checkbox("Enable real-time monitoring", True, key="enable_monitoring")
+                auto_adjust_dt = st.checkbox("Auto-adjust time step", True, key="auto_adjust_dt")
            
             # ================================================================
-            # Visualization settings (including physical contour masking)
+            # Visualization settings (including scale bar customization)
             # ================================================================
             st.subheader("🎨 Visualization Settings")
             # Global colormaps
-            global_cmap_phi = st.selectbox("Global φ colormap", cmap_list, index=cmap_list.index('RdBu_r') if 'RdBu_r' in cmap_list else 0)
-            global_cmap_stress = st.selectbox("Global σ_eq colormap", cmap_list, index=cmap_list.index('hot') if 'hot' in cmap_list else 0)
-            global_cmap_hydro = st.selectbox("Global σ_h colormap", cmap_list, index=cmap_list.index('RdBu') if 'RdBu' in cmap_list else 0)
+            global_cmap_phi = st.selectbox("Global φ colormap", cmap_list, index=cmap_list.index('RdBu_r') if 'RdBu_r' in cmap_list else 0, key="global_cmap_phi")
+            global_cmap_stress = st.selectbox("Global σ_eq colormap", cmap_list, index=cmap_list.index('hot') if 'hot' in cmap_list else 0, key="global_cmap_stress")
+            global_cmap_hydro = st.selectbox("Global σ_h colormap", cmap_list, index=cmap_list.index('RdBu') if 'RdBu' in cmap_list else 0, key="global_cmap_hydro")
            
             # Per-simulation overrides
-            sim_cmap_phi = st.selectbox("Simulation-specific φ colormap", cmap_list, index=cmap_list.index(global_cmap_phi) if global_cmap_phi in cmap_list else 0)
-            sim_cmap_stress = st.selectbox("Simulation-specific σ_eq colormap", cmap_list, index=cmap_list.index(global_cmap_stress) if global_cmap_stress in cmap_list else 0)
-            sim_cmap_hydro = st.selectbox("Simulation-specific σ_h colormap", cmap_list, index=cmap_list.index(global_cmap_hydro) if global_cmap_hydro in cmap_list else 0)
+            sim_cmap_phi = st.selectbox("Simulation-specific φ colormap", cmap_list, index=cmap_list.index(global_cmap_phi) if global_cmap_phi in cmap_list else 0, key="sim_cmap_phi")
+            sim_cmap_stress = st.selectbox("Simulation-specific σ_eq colormap", cmap_list, index=cmap_list.index(global_cmap_stress) if global_cmap_stress in cmap_list else 0, key="sim_cmap_stress")
+            sim_cmap_hydro = st.selectbox("Simulation-specific σ_h colormap", cmap_list, index=cmap_list.index(global_cmap_hydro) if global_cmap_hydro in cmap_list else 0, key="sim_cmap_hydro")
            
             # Scale bar customization
             st.subheader("📏 Scale Bar Settings")
-            scalebar_color = st.color_picker("Scale bar color", "#000000")
-            scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1)
-           
-            # [ENHANCEMENT] User control for physical twin boundary masking
-            st.subheader("🧪 Twin Boundary Contours")
-            mask_twin_contours = st.checkbox("Only draw contours inside the twinned grain (physical)", value=True,
-                                            help="When checked, the white contour lines (φ=0) will only appear inside the twin grain (eta1 > 0.5). This removes spurious lines from buffers and defects.")
+            scalebar_color = st.color_picker("Scale bar color", "#000000", key="scalebar_color")
+            scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1, key="scalebar_fontsize")
            
             # Initialize button
             if st.button("🚀 Initialize Simulation", type="primary", use_container_width=True):
                 params = {
+                    'material': material_choice,
                     'N': N, 'dx': dx, 'dt': dt,
                     'W': W, 'A': A, 'B': B,
                     'kappa0': kappa0, 'gamma_aniso': gamma_aniso, 'kappa_eta': kappa_eta,
@@ -2229,6 +2575,7 @@ def main():
                     'gb_curvature': gb_curvature,
                     'geometry_type': 'defect' if geometry_type == "Twin Grain with Defect" else 'standard',
                     'applied_stress': applied_stress_MPa * 1e6,
+                    'applied_stress_angle': loading_angle,
                     'n_steps': n_steps,
                     'save_frequency': save_frequency,
                     'stability_factor': stability_factor,
@@ -2239,8 +2586,7 @@ def main():
                     'global_cmap_stress': global_cmap_stress,
                     'global_cmap_hydro': global_cmap_hydro,
                     'scalebar_color': scalebar_color,
-                    'scalebar_fontsize': scalebar_fontsize,
-                    'mask_twin_contours': mask_twin_contours   # Store user preference
+                    'scalebar_fontsize': scalebar_fontsize
                 }
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
@@ -2301,11 +2647,11 @@ def main():
                
                 field_to_compare = st.selectbox(
                     "Field to Compare",
-                    ["phi (Twin Order)", "sigma_eq (Von Mises Stress)", "sigma_h (Hydrostatic Stress)",
+                    ["phi (Twin Order)", "eta1 (Grain)", "sigma_eq (Von Mises Stress)", "sigma_h (Hydrostatic Stress)",
                      "h (Twin Spacing)", "sigma_y (Yield Stress)"],
-                    index=1
+                    index=2
                 )
-                field_key = field_to_compare.split()[0]  # 'phi', 'sigma_eq', etc.
+                field_key = field_to_compare.split()[0]  # 'phi', 'eta1', 'sigma_eq', etc.
                
                 if comparison_type == "Overlay Line Profiles":
                     profile_direction = st.selectbox(
@@ -2347,7 +2693,7 @@ def main():
         # ====================================================================
         # MODE 3: Single Simulation View
         # ====================================================================
-        else:  # Single Simulation View
+        elif operation_mode == "Single Simulation View":
             st.header("🔍 Single Simulation View")
             simulations = SimulationDatabase.get_simulation_list()
             if not simulations:
@@ -2357,6 +2703,95 @@ def main():
                 selected_sim = st.selectbox("Select Simulation", list(sim_options.keys()))
                 if selected_sim:
                     st.session_state.selected_sim_id = sim_options[selected_sim]
+        
+        # ====================================================================
+        # MODE 4: Parameter Sweep
+        # ====================================================================
+        elif operation_mode == "Parameter Sweep":
+            st.header("📈 Parameter Sweep")
+            
+            # First, define a base configuration (similar to Run New Simulation)
+            st.subheader("Base Configuration")
+            
+            # Material selection
+            material_choice = st.selectbox("Material", ["Cu", "Al", "Ni"], key="sweep_material")
+            
+            # Geometry type
+            geom_type_sweep = st.selectbox("Geometry Type", ["Standard Twin Grain", "Twin Grain with Defect"], key="sweep_geom")
+            
+            # Basic parameters
+            col1, col2 = st.columns(2)
+            with col1:
+                N_sweep = st.slider("Grid size N", 64, 256, 128, 32, key="sweep_N")
+                dx_sweep = st.slider("dx (nm)", 0.2, 1.0, 0.5, 0.1, key="sweep_dx")
+                dt_sweep = st.slider("dt (ns)", 1e-5, 1e-3, 1e-4, 1e-5, format="%.5f", key="sweep_dt")
+                W_sweep = st.slider("W (J/m³)", 0.5, 5.0, 2.0, 0.1, key="sweep_W")
+            with col2:
+                n_steps_sweep = st.slider("Number of steps", 20, 200, 50, 10, key="sweep_steps")
+                save_freq_sweep = st.slider("Save frequency", 1, 50, 10, 1, key="sweep_savefreq")
+                twin_spacing_sweep = st.slider("Twin spacing (nm)", 10.0, 50.0, 20.0, 1.0, key="sweep_twin_spacing")
+                applied_stress_sweep = st.slider("Applied stress (MPa)", 0.0, 600.0, 300.0, 10.0, key="sweep_stress")
+            
+            # Select parameter to sweep
+            st.subheader("Sweep Parameter")
+            sweep_param = st.selectbox(
+                "Choose parameter to vary",
+                ["twin_spacing", "applied_stress", "applied_stress_angle", "W", "L_CTB", "L_ITB", "kappa0"],
+                index=0
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                sweep_min = st.number_input(f"Min {sweep_param}", value=10.0 if sweep_param=="twin_spacing" else 0.0, key="sweep_min")
+                sweep_max = st.number_input(f"Max {sweep_param}", value=50.0 if sweep_param=="twin_spacing" else 500.0, key="sweep_max")
+            with col2:
+                sweep_steps = st.number_input("Number of steps", min_value=2, max_value=20, value=5, step=1, key="sweep_steps")
+            
+            # Convert to appropriate type
+            if sweep_param in ["applied_stress"]:
+                # Convert MPa to Pa
+                sweep_values = np.linspace(sweep_min*1e6, sweep_max*1e6, sweep_steps)
+            else:
+                sweep_values = np.linspace(sweep_min, sweep_max, sweep_steps)
+            
+            st.write(f"Sweep values: {sweep_values}")
+            
+            # Base parameters (excluding the sweep param)
+            base_params = {
+                'material': material_choice,
+                'N': N_sweep, 'dx': dx_sweep, 'dt': dt_sweep,
+                'W': W_sweep,
+                'A': 5.0, 'B': 10.0,  # defaults
+                'kappa0': 1.0, 'gamma_aniso': 0.7, 'kappa_eta': 2.0,
+                'L_CTB': 0.05, 'L_ITB': 5.0, 'n_mob': 4, 'L_eta': 1.0, 'zeta': 0.3,
+                'twin_spacing': twin_spacing_sweep,
+                'grain_boundary_pos': 0.0,
+                'gb_width': 3.0,
+                'buffer_width': 5.0,
+                'left_buffer_width': 5.0,
+                'gb_profile': 'plane',
+                'gb_curvature': 0.0,
+                'geometry_type': 'defect' if geom_type_sweep == "Twin Grain with Defect" else 'standard',
+                'applied_stress': applied_stress_sweep * 1e6,
+                'applied_stress_angle': 0.0,
+                'n_steps': n_steps_sweep,
+                'save_frequency': save_freq_sweep,
+                'stability_factor': 0.5,
+            }
+            
+            if geom_type_sweep == "Twin Grain with Defect":
+                base_params['defect_type'] = 'dislocation'
+                base_params['defect_pos'] = (0.0, 0.0)
+                base_params['defect_radius'] = 10.0
+            
+            if st.button("🚀 Run Parameter Sweep", type="primary"):
+                with st.spinner("Running parameter sweep..."):
+                    sweep_results = ParameterSweep.run_sweep(base_params, sweep_param, sweep_values, save=True)
+                
+                st.session_state.sweep_results = sweep_results
+                st.session_state.sweep_param = sweep_param
+                st.success("Parameter sweep completed!")
+                st.rerun()
    
     # ========================================================================
     # MAIN CONTENT AREA
@@ -2364,7 +2799,7 @@ def main():
     # Mode-specific main display
     if operation_mode == "Compare Saved Simulations" and 'comparison_config' in st.session_state:
         # ----------------------------------------------
-        # COMPARISON DISPLAY (unchanged from previous version)
+        # COMPARISON DISPLAY (FULLY IMPLEMENTED)
         # ----------------------------------------------
         st.header("🔬 Multi-Simulation Comparison")
         config = st.session_state.comparison_config
@@ -2382,25 +2817,234 @@ def main():
             st.error("No valid simulations found.")
         else:
             st.success(f"Loaded {len(simulations)} simulations")
-           
-            # Determine field to compare
-            field = config['field']
-            if field == 'sigma_eq' or field == 'sigma_h':
-                unit_scale = 1e9
-                unit_label = 'GPa'
-            elif field == 'sigma_y':
-                unit_scale = 1e6
-                unit_label = 'MPa'
-            else:
-                unit_scale = 1
-                unit_label = ''
-           
-            # (All comparison sub‑modes are identical to the original code; omitted here for brevity but fully functional)
-            st.info("Comparison display is fully implemented; see original code for details.")
+            
+            # Extract parameters and results for comparison
+            sim_names = [build_sim_name(sim['params'], sim['id']) for sim in simulations]
+            sim_params_list = [sim['params'] for sim in simulations]
+            sim_history_list = [sim['results_history'] for sim in simulations]
+            
+            if config['type'] == "Side-by-Side Heatmaps":
+                # Get last frame from each simulation
+                last_frames = []
+                for sim in simulations:
+                    if sim['results_history']:
+                        last_frames.append(sim['results_history'][-1])
+                    else:
+                        last_frames.append(None)
+                
+                # Filter out None
+                valid_indices = [i for i, f in enumerate(last_frames) if f is not None]
+                if not valid_indices:
+                    st.warning("No frame data available.")
+                else:
+                    # Create subplots
+                    n_sims = len(valid_indices)
+                    cols = min(3, n_sims)
+                    rows = (n_sims + cols - 1) // cols
+                    
+                    fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+                    if rows == 1 and cols == 1:
+                        axes = np.array([axes])
+                    else:
+                        axes = axes.flatten()
+                    
+                    for idx, sim_idx in enumerate(valid_indices):
+                        ax = axes[idx]
+                        sim = simulations[sim_idx]
+                        frame = last_frames[sim_idx]
+                        field = config['field']
+                        
+                        if field in frame:
+                            data = frame[field].copy()
+                            if field in ['sigma_eq', 'sigma_h']:
+                                data = data / 1e9
+                            elif field == 'sigma_y':
+                                data = data / 1e6
+                            
+                            extent = [-sim['params']['N']*sim['params']['dx']/2,
+                                      sim['params']['N']*sim['params']['dx']/2] * 2
+                            im = ax.imshow(data, extent=extent, cmap='viridis', origin='lower')
+                            ax.set_title(sim_names[sim_idx][:30] + "...", fontsize=8)
+                            ax.set_xlabel('x (nm)')
+                            ax.set_ylabel('y (nm)')
+                            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    
+                    # Turn off unused axes
+                    for idx in range(len(valid_indices), len(axes)):
+                        axes[idx].axis('off')
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+            
+            elif config['type'] == "Overlay Line Profiles":
+                # Use Plotly for overlay
+                fig = go.Figure()
+                
+                # Get a visualizer for one simulation to use line profiler
+                ref_sim = simulations[0]
+                N = ref_sim['params']['N']
+                dx = ref_sim['params']['dx']
+                visualizer = EnhancedTwinVisualizer(N, dx)
+                
+                for sim_idx, sim in enumerate(simulations):
+                    if not sim['results_history']:
+                        continue
+                    frame = sim['results_history'][-1]
+                    field = config['field']
+                    if field not in frame:
+                        continue
+                    
+                    # Extract profile
+                    distance, profile, _ = visualizer.line_profiler.extract_profile(
+                        frame[field], config['profile_direction'], 
+                        config['position_ratio'], 
+                        config.get('custom_angle', 45)
+                    )
+                    
+                    if field in ['sigma_eq', 'sigma_h']:
+                        profile = profile / 1e9
+                        ylabel = 'Stress (GPa)'
+                    elif field == 'sigma_y':
+                        profile = profile / 1e6
+                        ylabel = 'Stress (MPa)'
+                    else:
+                        ylabel = field
+                    
+                    fig.add_trace(go.Scatter(
+                        x=distance, y=profile,
+                        mode='lines',
+                        name=sim_names[sim_idx][:30]
+                    ))
+                
+                fig.update_layout(
+                    title=f"{field} Line Profiles Comparison",
+                    xaxis_title="Position (nm)",
+                    yaxis_title=ylabel,
+                    hovermode='x unified',
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            elif config['type'] == "Statistical Summary":
+                # Extract key metrics from each simulation
+                metrics = ['twin_spacing', 'applied_stress', 'W', 'n_steps']
+                data = []
+                for sim in simulations:
+                    params = sim['params']
+                    hist = sim['results_history']
+                    if hist:
+                        last = hist[-1]['convergence'] if 'convergence' in hist[-1] else {}
+                        row = {
+                            'Name': build_sim_name(params, sim['id'])[:40],
+                            'λ (nm)': params.get('twin_spacing', 0),
+                            'σ_app (MPa)': params.get('applied_stress', 0)/1e6,
+                            'θ (deg)': params.get('applied_stress_angle', 0),
+                            'W (J/m³)': params.get('W', 0),
+                            'Avg σ_eq (GPa)': last.get('avg_stress', 0)/1e9,
+                            'Max σ_eq (GPa)': last.get('max_stress', 0)/1e9,
+                            'Avg h (nm)': last.get('avg_spacing', 0),
+                            'Plastic Work (J)': last.get('plastic_work', 0),
+                            'Energy (J)': last.get('energy', 0),
+                        }
+                        data.append(row)
+                
+                if data:
+                    df = pd.DataFrame(data)
+                    st.dataframe(df)
+                    
+                    # Bar chart of avg stress
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=df['Name'], y=df['Avg σ_eq (GPa)'], name='Avg Stress'))
+                    fig.add_trace(go.Bar(x=df['Name'], y=df['Max σ_eq (GPa)'], name='Max Stress'))
+                    fig.update_layout(title="Stress Comparison", xaxis_title="Simulation", yaxis_title="Stress (GPa)")
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Scatter plot: twin spacing vs avg stress
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(x=df['λ (nm)'], y=df['Avg σ_eq (GPa)'], mode='markers+text',
+                                              text=df['Name'], textposition='top center'))
+                    fig2.update_layout(title="Twin Spacing vs. Avg Stress", xaxis_title="λ (nm)", yaxis_title="Avg Stress (GPa)")
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.warning("No convergence data available.")
+            
+            elif config['type'] == "Correlation Analysis":
+                # Scatter matrix of parameters vs metrics
+                metrics = ['twin_spacing', 'applied_stress', 'W', 'avg_stress', 'max_stress', 'avg_spacing', 'plastic_work']
+                data = []
+                for sim in simulations:
+                    params = sim['params']
+                    hist = sim['results_history']
+                    if hist and 'convergence' in hist[-1]:
+                        conv = hist[-1]['convergence']
+                        row = {
+                            'twin_spacing': params.get('twin_spacing', 0),
+                            'applied_stress': params.get('applied_stress', 0)/1e6,
+                            'W': params.get('W', 0),
+                            'avg_stress': conv.get('avg_stress', 0)/1e9,
+                            'max_stress': conv.get('max_stress', 0)/1e9,
+                            'avg_spacing': conv.get('avg_spacing', 0),
+                            'plastic_work': conv.get('plastic_work', 0),
+                        }
+                        data.append(row)
+                
+                if data:
+                    df = pd.DataFrame(data)
+                    fig = go.Figure(data=go.Splom(
+                        dimensions=[dict(label=k, values=df[k]) for k in df.columns],
+                        showupperhalf=False,
+                        marker=dict(size=8)
+                    ))
+                    fig.update_layout(title="Correlation Matrix", width=800, height=800)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No convergence data available.")
+            
+            elif config['type'] == "Evolution Timeline":
+                # Overlay evolution of a metric across simulations
+                metric_map = {
+                    'phi': 'phi_norm',
+                    'sigma_eq': 'avg_stress',
+                    'h': 'twin_spacing_avg',
+                    'energy': 'energy',
+                    'plastic_work': 'plastic_work'
+                }
+                chosen_metric = st.selectbox("Metric to track", list(metric_map.keys()))
+                
+                fig = go.Figure()
+                for sim_idx, sim in enumerate(simulations):
+                    if not sim['results_history']:
+                        continue
+                    hist = sim['history'] if 'history' in sim else None
+                    if hist is None and 'solver' in sim:
+                        hist = sim['solver'].history
+                    if hist is None:
+                        continue
+                    
+                    metric_key = metric_map.get(chosen_metric, chosen_metric)
+                    if metric_key not in hist:
+                        continue
+                    
+                    times = np.arange(len(hist[metric_key])) * sim['params'].get('dt', 1e-4)
+                    values = hist[metric_key]
+                    if chosen_metric in ['sigma_eq']:
+                        values = np.array(values) / 1e9
+                    
+                    fig.add_trace(go.Scatter(x=times, y=values, mode='lines', name=sim_names[sim_idx][:30]))
+                
+                fig.update_layout(
+                    title=f"{chosen_metric} Evolution Comparison",
+                    xaxis_title="Time (ns)",
+                    yaxis_title=chosen_metric,
+                    hovermode='x unified',
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig, use_container_width=True)
        
     elif operation_mode == "Single Simulation View" and 'selected_sim_id' in st.session_state:
         # ----------------------------------------------
-        # SINGLE SIMULATION VIEW (with animation)
+        # SINGLE SIMULATION VIEW (with animation and export)
         # ----------------------------------------------
         sim_id = st.session_state.selected_sim_id
         sim_data = SimulationDatabase.get_simulation(sim_id)
@@ -2413,7 +3057,9 @@ def main():
             with col1:
                 st.metric("λ (twin spacing)", f"{params.get('twin_spacing', 0):.1f} nm")
             with col2:
-                st.metric("σ_app", f"{params.get('applied_stress', 0)/1e6:.0f} MPa")
+                stress_mag = params.get('applied_stress', 0)/1e6
+                angle = params.get('applied_stress_angle', 0)
+                st.metric("σ_app / θ", f"{stress_mag:.0f} MPa / {angle:.0f}°")
             with col3:
                 st.metric("W (well depth)", f"{params.get('W', 0):.2f} J/m³")
             with col4:
@@ -2448,18 +3094,20 @@ def main():
                 # Get current frame
                 results = history[frame_idx]
                
-                # Visualize using enhanced visualizer (physical contour masking uses stored preference)
+                # Visualize using enhanced visualizer
                 visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
+                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
                     'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
                     'scalebar_color': params.get('scalebar_color', 'black'),
                     'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
                 fig = visualizer.create_multi_field_comparison(results, style_params)
-                st.pyplot(fig)
-                plt.close(fig)
+                if fig:
+                    st.pyplot(fig)
+                    plt.close(fig)
                
                 # Delete option
                 if st.button("🗑️ Delete This Simulation", key=f"delete_{sim_id}"):
@@ -2475,7 +3123,7 @@ def main():
    
     elif operation_mode == "Run New Simulation" and 'initialized' in st.session_state:
         # ----------------------------------------------
-        # RUN NEW SIMULATION - TABBED INTERFACE (WITH NEW 3D TAB AND PHYSICAL CONTOUR TOGGLE)
+        # RUN NEW SIMULATION - TABBED INTERFACE (WITH NEW 3D TAB & ANIMATION EXPORT)
         # ----------------------------------------------
         params = st.session_state.initial_geometry['params']
         N = params['N']; dx = params['dx']
@@ -2498,16 +3146,18 @@ def main():
             initial_results = {'phi': phi, 'eta1': eta1, 'h': h}
            
             style_params = {
+                'eta1_cmap': 'Reds',
                 'scalebar_color': params.get('scalebar_color', 'black'),
                 'scalebar_fontsize': params.get('scalebar_fontsize', 10)
             }
             fig = visualizer.create_multi_field_comparison(initial_results, style_params)
-            st.pyplot(fig)
-            plt.close(fig)
+            if fig:
+                st.pyplot(fig)
+                plt.close(fig)
            
             col1, col2, col3 = st.columns(3)
             with col1:
-                avg_spacing = np.mean(h[(h>5)&(h<50)])
+                avg_spacing = np.mean(h[(h>5)&(h<50)]) if np.any((h>5)&(h<50)) else 0
                 st.metric("Avg Twin Spacing", f"{avg_spacing:.1f} nm")
             with col2:
                 twin_area = np.sum(eta1 > 0.5) * dx**2
@@ -2541,7 +3191,7 @@ def main():
                         for step in range(n_steps):
                             status_text.text(f"Step {step+1}/{n_steps} | Time: {(step+1)*dt:.4f} ns")
                            
-                            results = solver.step(params['applied_stress'])
+                            results = solver.step()  # Now uses angle internally
                            
                             if step % save_freq == 0:
                                 results_history.append(results.copy())
@@ -2590,14 +3240,16 @@ def main():
                
                 style_params = {
                     'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
+                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),
                     'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
                     'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
                     'scalebar_color': params.get('scalebar_color', 'black'),
                     'scalebar_fontsize': params.get('scalebar_fontsize', 10)
                 }
                 fig = visualizer.create_multi_field_comparison(results, style_params)
-                st.pyplot(fig)
-                plt.close(fig)
+                if fig:
+                    st.pyplot(fig)
+                    plt.close(fig)
                
                 st.subheader("Convergence Monitoring")
                 if hasattr(st.session_state, 'solver') and st.session_state.solver.history['phi_norm']:
@@ -2629,8 +3281,8 @@ def main():
                 with col2:
                     field_to_profile = st.selectbox(
                         "Field to Profile",
-                        ["phi", "sigma_eq", "sigma_h", "h", "sigma_y"],
-                        index=1
+                        ["phi", "eta1", "sigma_eq", "sigma_h", "h", "sigma_y"],
+                        index=2
                     )
                
                 profile_type_mapping = {
@@ -2677,17 +3329,14 @@ def main():
                
                 plotly_field = st.selectbox(
                     "Select field to visualize",
-                    ["phi", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
+                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
                     index=0, key="plotly_2d_field"
                 )
                 frame_idx_plotly = st.slider("Frame", 0, len(results_history)-1, len(results_history)-1,
                                              key="plotly_2d_frame")
                 results = results_history[frame_idx_plotly]
                
-                # [ENHANCEMENT] Use the user's contour masking preference
-                mask_contours = params.get('mask_twin_contours', True)
-                fig_heatmap = visualizer.create_plotly_heatmap(results, plotly_field, frame_idx_plotly,
-                                                              mask_twin_boundary=mask_contours)
+                fig_heatmap = visualizer.create_plotly_heatmap(results, plotly_field, frame_idx_plotly)
                 if fig_heatmap:
                     st.plotly_chart(fig_heatmap, use_container_width=True)
                
@@ -2725,24 +3374,19 @@ def main():
             if 'results_history' in st.session_state:
                 results_history = st.session_state.results_history
                
-                # Field selector for 3D
                 field_3d = st.selectbox(
                     "Select field for 3D surface",
-                    ["phi", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
+                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
                     index=1, key="3d_field"
                 )
                
-                # Frame slider
                 frame_idx_3d = st.slider("Frame", 0, len(results_history)-1, len(results_history)-1,
                                          key="3d_frame")
                 results = results_history[frame_idx_3d]
                
-                # Create 3D surface plot
                 fig_3d = visualizer.create_plotly_3d_surface(results, field_3d, frame_idx_3d)
                 if fig_3d:
                     st.plotly_chart(fig_3d, use_container_width=True)
-                    
-                    # Add explanation
                     st.markdown("""
                     **💡 Interactivity**: 
                     - **Rotate** by dragging, **zoom** with scroll, **pan** with right‑click drag.
@@ -2752,133 +3396,158 @@ def main():
                 else:
                     st.warning(f"Field '{field_3d}' not available in current results.")
             else:
-                st.info("Run a simulation first to generate 3D interactive plots.")
+                st.info("Run a simulation first to generate 3D visualizations.")
        
-        with tabs[6]:  # Enhanced Export
-            st.header("Enhanced Export Options")
-            if 'results_history' in st.session_state:
-                # Individual format downloads
-                sim_data_full = SimulationDatabase.get_simulation(
-                    SimulationDatabase.generate_id(params)
-                ) or {'metadata': {}}
-               
-                sim_name = build_sim_name(params, sim_id=sim_data_full.get('id', ''))
-               
-                st.subheader("📦 Individual Format Downloads")
-                col1, col2, col3, col4, col5 = st.columns(5)
-               
+        # ====================================================================
+        # NEW TAB: Enhanced Export (including animations and HDF5)
+        # ====================================================================
+        with tabs[6]:
+            st.header("📤 Enhanced Export")
+            if 'results_history' in st.session_state and st.session_state.results_history:
+                results_history = st.session_state.results_history
+                params = st.session_state.initial_geometry['params']
+                sim_id = SimulationDatabase.generate_id(params)
+                sim_name = build_sim_name(params, sim_id)
+                sim_data = {'metadata': MetadataManager.create_metadata(params, results_history), 'params': params}
+                
+                st.subheader("Export Simulation Data")
+                col1, col2, col3 = st.columns(3)
+                
                 with col1:
-                    pkl_buffer, pkl_name = DataExporter.export_pkl(
-                        sim_data_full, params, st.session_state.results_history, sim_name
-                    )
-                    st.download_button("📥 PKL", pkl_buffer, pkl_name, "application/octet-stream")
-               
+                    if st.button("📦 Pickle (PKL)"):
+                        buffer, fname = DataExporter.export_pkl(sim_data, params, results_history, sim_name)
+                        st.download_button("Download PKL", buffer, fname)
+                    
+                    if st.button("🔥 PyTorch (PT)"):
+                        buffer, fname = DataExporter.export_pt(sim_data, params, results_history, sim_name)
+                        st.download_button("Download PT", buffer, fname)
+                    
+                    if st.button("📄 SQL Dump"):
+                        buffer, fname = DataExporter.export_sql(sim_data, params, results_history, sim_name, sim_id, params['N'], params['dx'])
+                        st.download_button("Download SQL", buffer, fname)
+                
                 with col2:
-                    pt_buffer, pt_name = DataExporter.export_pt(
-                        sim_data_full, params, st.session_state.results_history, sim_name
-                    )
-                    st.download_button("⚡ PT", pt_buffer, pt_name, "application/octet-stream")
-               
+                    if st.button("📊 CSV (ZIP)"):
+                        visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
+                        buffer, fname = DataExporter.export_csv(results_history, sim_name, visualizer.extent, params['N'], params['dx'])
+                        st.download_button("Download CSV ZIP", buffer, fname)
+                    
+                    if st.button("📋 JSON"):
+                        buffer, fname = DataExporter.export_json(sim_data, params, results_history, sim_name)
+                        st.download_button("Download JSON", buffer, fname)
+                    
+                    if st.button("📁 HDF5"):
+                        buffer, fname = DataExporter.export_hdf5(sim_data, params, results_history, sim_name, params['N'], params['dx'])
+                        if buffer:
+                            st.download_button("Download HDF5", buffer, fname)
+                
                 with col3:
-                    sql_buffer, sql_name = DataExporter.export_sql(
-                        sim_data_full, params, st.session_state.results_history, sim_name,
-                        sim_data_full.get('id', ''), N, dx
-                    )
-                    st.download_button("🗃️ SQL", sql_buffer, sql_name, "application/sql")
-               
-                with col4:
-                    csv_buffer, csv_name = DataExporter.export_csv(
-                        st.session_state.results_history, sim_name,
-                        visualizer.extent, N, dx
-                    )
-                    st.download_button("📊 CSV (ZIP)", csv_buffer, csv_name, "application/zip")
-               
-                with col5:
-                    json_buffer, json_name = DataExporter.export_json(
-                        sim_data_full, params, st.session_state.results_history, sim_name
-                    )
-                    st.download_button("📄 JSON", json_buffer, json_name, "application/json")
-               
-                st.subheader("📦 Bulk Export All Simulations")
-                if st.button("🚀 Export All Simulations as ZIP"):
-                    with st.spinner("Creating bulk export..."):
-                        bulk_buffer, bulk_name = DataExporter.bulk_export_all_simulations(N, dx, visualizer.extent)
-                        if bulk_buffer:
-                            st.download_button(
-                                "📥 Download All Simulations ZIP",
-                                bulk_buffer,
-                                bulk_name,
-                                "application/zip"
-                            )
-                        else:
-                            st.warning("No simulations to export.")
+                    st.subheader("Animation Export")
+                    anim_field = st.selectbox("Field for animation", 
+                                              ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag"],
+                                              key="anim_field")
+                    anim_format = st.selectbox("Format", ["gif", "mp4"], key="anim_format")
+                    fps = st.slider("FPS", 1, 30, 5)
+                    
+                    if st.button("🎬 Generate Animation"):
+                        with st.spinner("Creating animation..."):
+                            visualizer = EnhancedTwinVisualizer(params['N'], params['dx'])
+                            anim_buffer = visualizer.create_animation(results_history, anim_field, anim_format, fps)
+                            if anim_buffer:
+                                st.download_button(f"Download {anim_format.upper()}", anim_buffer, 
+                                                   f"{sim_name}_{anim_field}.{anim_format}")
+                
+                st.markdown("---")
+                st.subheader("Bulk Export All Simulations")
+                if st.button("📦 Export All Simulations"):
+                    bulk_buffer, bulk_fname = DataExporter.bulk_export_all_simulations(params['N'], params['dx'], 
+                                                                                      EnhancedTwinVisualizer(params['N'], params['dx']).extent)
+                    if bulk_buffer:
+                        st.download_button("Download All Simulations ZIP", bulk_buffer, bulk_fname)
             else:
-                st.info("Run a simulation first to export results.")
-   
-    else:
-        # Welcome screen when no simulation initialized and not in compare/single mode
-        st.markdown("""
-        <div style="text-align: center; padding: 3rem;">
-        <h2>Welcome to the Enhanced Nanotwinned Copper Simulator</h2>
-        <p style="font-size: 1.2rem; color: #666; margin-bottom: 2rem;">
-        Configure simulation parameters in the sidebar and click "Initialize Simulation" to begin.
-        </p>
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-top: 2rem;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    padding: 1.5rem; border-radius: 10px; color: white;">
-        <h4>🎯 Advanced Physics</h4>
-        <p>Phase-field modeling of FCC nanotwins with spectral elasticity solver</p>
-        </div>
-        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                    padding: 1.5rem; border-radius: 10px; color: white;">
-        <h4>📊 Enhanced Analysis</h4>
-        <p>Line profiling, statistical analysis, correlation plots, multi-simulation comparison</p>
-        </div>
-        <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-                    padding: 1.5rem; border-radius: 10px; color: white;">
-        <h4>🖥️ 3D Visualization</h4>
-        <p>Rotatable interactive surfaces of stress, strain, and order parameters</p>
-        </div>
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
-   
-    # ========================================================================
-    # DEBUG PANEL (always visible, expandable)
-    # ========================================================================
-    with st.expander("🐛 Debug Information", expanded=False):
-        st.subheader("Session State Keys")
-        st.write(list(st.session_state.keys()))
-       
-        st.subheader("Stored Simulations")
-        all_sims = SimulationDatabase.get_all_simulations()
-        if all_sims:
-            debug_info = {}
-            total_memory = 0
-            for k, v in all_sims.items():
-                history = v.get('results_history', [])
-                mem = 0
-                for frame in history:
-                    for fname in ['phi', 'eta1', 'eta2', 'sigma_eq', 'sigma_h', 'h']:
-                        if fname in frame:
-                            mem += frame[fname].nbytes
-                total_memory += mem
-                debug_info[k] = {
-                    'id': v.get('id'),
-                    'params': list(v.get('params', {}).keys()),
-                    'history_len': len(history),
-                    'metadata_keys': list(v.get('metadata', {}).keys()),
-                    'est_memory_MB': mem / (1024*1024)
-                }
-            st.json(debug_info)
-            st.write(f"**Estimated total memory usage:** {total_memory / (1024*1024):.2f} MB")
+                st.info("Run a simulation first to export data.")
+    
+    elif operation_mode == "Parameter Sweep" and 'sweep_results' in st.session_state:
+        # ----------------------------------------------
+        # PARAMETER SWEEP RESULTS DISPLAY
+        # ----------------------------------------------
+        st.header("📊 Parameter Sweep Results")
+        sweep_results = st.session_state.sweep_results
+        sweep_param = st.session_state.sweep_param
+        
+        # Extract param values and metrics
+        param_vals = []
+        avg_stress = []
+        max_stress = []
+        avg_spacing = []
+        plastic_work = []
+        
+        for res in sweep_results:
+            if res['convergence'] is not None:
+                param_vals.append(res['param_value'])
+                conv = res['convergence']
+                # Convert stress to GPa if needed
+                avg_stress.append(conv.get('sigma_eq', 0) / 1e9 if isinstance(conv.get('sigma_eq'), (int, float)) else 0)
+                max_stress.append(conv.get('max_stress', 0) / 1e9)
+                avg_spacing.append(conv.get('twin_spacing_avg', 0))
+                plastic_work.append(conv.get('plastic_work', 0))
+        
+        # Convert param_vals to display units
+        if sweep_param == 'applied_stress':
+            param_display = np.array(param_vals) / 1e6
+            param_label = "Applied Stress (MPa)"
         else:
-            st.write("No simulations in database.")
-       
-        st.subheader("System Info")
-        import sys
-        st.write(f"Python version: {sys.version}")
-        st.write(f"Numba available: {hasattr(prange, '__name__')}")
+            param_display = param_vals
+            param_label = sweep_param.replace('_', ' ').title()
+        
+        # Create plots
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        axes[0,0].plot(param_display, avg_stress, 'o-', linewidth=2)
+        axes[0,0].set_xlabel(param_label)
+        axes[0,0].set_ylabel("Avg Von Mises Stress (GPa)")
+        axes[0,0].set_title("Stress vs Parameter")
+        axes[0,0].grid(True, alpha=0.3)
+        
+        axes[0,1].plot(param_display, avg_spacing, 's-', color='green', linewidth=2)
+        axes[0,1].set_xlabel(param_label)
+        axes[0,1].set_ylabel("Avg Twin Spacing (nm)")
+        axes[0,1].set_title("Twin Spacing vs Parameter")
+        axes[0,1].grid(True, alpha=0.3)
+        
+        axes[1,0].plot(param_display, plastic_work, 'd-', color='red', linewidth=2)
+        axes[1,0].set_xlabel(param_label)
+        axes[1,0].set_ylabel("Plastic Work (J)")
+        axes[1,0].set_title("Plastic Work vs Parameter")
+        axes[1,0].grid(True, alpha=0.3)
+        
+        axes[1,1].plot(param_display, max_stress, '^-', color='purple', linewidth=2, label='Max')
+        axes[1,1].plot(param_display, avg_stress, 'o-', color='blue', linewidth=2, label='Avg')
+        axes[1,1].set_xlabel(param_label)
+        axes[1,1].set_ylabel("Stress (GPa)")
+        axes[1,1].set_title("Stress Extremes vs Parameter")
+        axes[1,1].legend()
+        axes[1,1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+        
+        # Data table
+        df_sweep = pd.DataFrame({
+            param_label: param_display,
+            'Avg Stress (GPa)': avg_stress,
+            'Max Stress (GPa)': max_stress,
+            'Avg Spacing (nm)': avg_spacing,
+            'Plastic Work (J)': plastic_work
+        })
+        st.dataframe(df_sweep)
+        
+        # Option to clear sweep results
+        if st.button("Clear Sweep Results"):
+            del st.session_state.sweep_results
+            del st.session_state.sweep_param
+            st.rerun()
 
 if __name__ == "__main__":
     main()
