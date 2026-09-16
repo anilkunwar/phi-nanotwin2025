@@ -2040,4 +2040,722 @@ def main():
                      "h (Twin Spacing)", "sigma_y (Yield Stress)"], index=2)
                 field_key = field_to_compare.split()[0]
                 if comparison_type == "Overlay Line Profiles":
-                    profile_direction = st
+                    profile_direction = st.selectbox(
+                        "Profile Direction",
+                        ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal", "Custom"],
+                        index=0)
+                    position_ratio = st.slider("Position Ratio", 0.0, 1.0, 0.5, 0.1)
+                    profile_type_mapping = {
+                        "Horizontal": "horizontal", "Vertical": "vertical",
+                        "Diagonal": "diagonal", "Anti-Diagonal": "anti_diagonal",
+                        "Custom": "custom"}
+                    internal_direction = profile_type_mapping.get(profile_direction, "horizontal")
+                    if profile_direction == "Custom":
+                        custom_angle = st.slider("Custom angle (deg)", -180, 180, 45, 5)
+                    else:
+                        custom_angle = 45
+                if st.button("🔬 Run Comparison", type="primary"):
+                    comparison_config = {
+                        'sim_ids': [sim_options[name] for name in selected_sim_ids],
+                        'type': comparison_type, 'field': field_key}
+                    if comparison_type == "Overlay Line Profiles":
+                        comparison_config.update({
+                            'profile_direction': internal_direction,
+                            'position_ratio': position_ratio,
+                            'custom_angle': custom_angle if profile_direction == "Custom" else None})
+                    st.session_state.comparison_config = comparison_config
+                    st.rerun()
+       
+        elif operation_mode == "Single Simulation View":
+            st.header("🔍 Single Simulation View")
+            simulations = SimulationDatabase.get_simulation_list()
+            if not simulations:
+                st.warning("No simulations saved yet.")
+            else:
+                sim_options = {sim['name']: sim['id'] for sim in simulations}
+                selected_sim = st.selectbox("Select Simulation", list(sim_options.keys()))
+                if selected_sim:
+                    st.session_state.selected_sim_id = sim_options[selected_sim]
+        
+        elif operation_mode == "Parameter Sweep":
+            st.header("📈 Parameter Sweep")
+            st.subheader("Base Configuration")
+            material_choice = st.selectbox("Material", ["Cu", "Al", "Ni"],
+                                          key="sweep_material")
+            geom_type_sweep = st.selectbox(
+                "Geometry Type",
+                ["Standard Twin Grain", "Twin Grain with Defect"], key="sweep_geom")
+            col1, col2 = st.columns(2)
+            with col1:
+                N_sweep = st.slider("Grid size N", 64, 256, 128, 32, key="sweep_N")
+                dx_sweep = st.slider("dx (nm)", 0.2, 1.0, 0.5, 0.1, key="sweep_dx")
+                dt_sweep = st.slider("dt (ns)", 1e-5, 1e-2, 1e-3, 1e-5,
+                                     format="%.5f", key="sweep_dt")
+                W_sweep = st.slider("W (J/m³)", 0.5, 5.0, 2.0, 0.1, key="sweep_W")
+            with col2:
+                n_steps_sweep = st.slider("Number of steps", 20, 200, 50, 10,
+                                          key="sweep_steps")
+                save_freq_sweep = st.slider("Save frequency", 1, 50, 10, 1,
+                                            key="sweep_savefreq")
+                twin_spacing_sweep = st.slider("Twin spacing (nm)", 10.0, 50.0, 20.0, 1.0,
+                                              key="sweep_twin_spacing")
+                applied_stress_sweep = st.slider("Applied stress (MPa)", 0.0, 600.0, 300.0,
+                                                10.0, key="sweep_stress")
+            st.subheader("Sweep Parameter")
+            sweep_param = st.selectbox(
+                "Choose parameter to vary",
+                ["twin_spacing", "applied_stress", "applied_stress_angle",
+                 "W", "L_CTB", "L_ITB", "kappa0"], index=0)
+            col1, col2 = st.columns(2)
+            with col1:
+                sweep_min = st.number_input(
+                    f"Min {sweep_param}",
+                    value=10.0 if sweep_param=="twin_spacing" else 0.0, key="sweep_min")
+                sweep_max = st.number_input(
+                    f"Max {sweep_param}",
+                    value=50.0 if sweep_param=="twin_spacing" else 500.0, key="sweep_max")
+            with col2:
+                sweep_steps = st.number_input("Number of steps", min_value=2, max_value=20,
+                                              value=5, step=1, key="sweep_steps")
+            if sweep_param in ["applied_stress"]:
+                sweep_values = np.linspace(sweep_min*1e6, sweep_max*1e6, sweep_steps)
+            else:
+                sweep_values = np.linspace(sweep_min, sweep_max, sweep_steps)
+            st.write(f"Sweep values: {sweep_values}")
+            base_params = {
+                'material': material_choice,
+                'N': N_sweep, 'dx': dx_sweep, 'dt': dt_sweep, 'W': W_sweep,
+                'A': 5.0, 'B': 10.0,
+                'kappa0': 1.0, 'gamma_aniso': 0.7, 'kappa_eta': 2.0,
+                'L_CTB': 0.05, 'L_ITB': 5.0, 'n_mob': 4, 'L_eta': 1.0, 'zeta': 0.3,
+                'twin_spacing': twin_spacing_sweep,
+                'grain_boundary_pos': 0.0, 'gb_width': 3.0,
+                'buffer_width': 5.0, 'left_buffer_width': 5.0,
+                'gb_profile': 'plane', 'gb_curvature': 0.0,
+                'geometry_type': 'defect' if geom_type_sweep == "Twin Grain with Defect" else 'standard',
+                'applied_stress': applied_stress_sweep * 1e6,
+                'applied_stress_angle': 0.0,
+                'n_steps': n_steps_sweep, 'save_frequency': save_freq_sweep,
+                'stability_factor': 0.5, 'confine_twin': True}
+            if geom_type_sweep == "Twin Grain with Defect":
+                base_params['defect_type'] = 'dislocation'
+                base_params['defect_pos'] = (0.0, 0.0)
+                base_params['defect_radius'] = 10.0
+            if st.button("🚀 Run Parameter Sweep", type="primary"):
+                with st.spinner("Running parameter sweep..."):
+                    sweep_results = ParameterSweep.run_sweep(
+                        base_params, sweep_param, sweep_values, save=True)
+                st.session_state.sweep_results = sweep_results
+                st.session_state.sweep_param = sweep_param
+                st.success("Parameter sweep completed!")
+                st.rerun()
+   
+    # ========================================================================
+    # MAIN CONTENT
+    # ========================================================================
+    if operation_mode == "Compare Saved Simulations" and 'comparison_config' in st.session_state:
+        st.header("🔬 Multi-Simulation Comparison")
+        config = st.session_state.comparison_config
+        simulations = []
+        valid_ids = []
+        for sim_id in config['sim_ids']:
+            sim = SimulationDatabase.get_simulation(sim_id)
+            if sim:
+                simulations.append(sim)
+                valid_ids.append(sim_id)
+        if not simulations:
+            st.error("No valid simulations found.")
+        else:
+            st.success(f"Loaded {len(simulations)} simulations")
+            sim_names = [build_sim_name(sim['params'], sim['id']) for sim in simulations]
+            if config['type'] == "Side-by-Side Heatmaps":
+                last_frames = []
+                for sim in simulations:
+                    last_frames.append(sim['results_history'][-1]
+                                       if sim['results_history'] else None)
+                valid_indices = [i for i, f in enumerate(last_frames) if f is not None]
+                if not valid_indices:
+                    st.warning("No frame data available.")
+                else:
+                    n_sims = len(valid_indices)
+                    cols = min(3, n_sims)
+                    rows = (n_sims + cols - 1) // cols
+                    fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+                    if rows == 1 and cols == 1:
+                        axes = np.array([axes])
+                    else:
+                        axes = axes.flatten()
+                    for idx, sim_idx in enumerate(valid_indices):
+                        ax = axes[idx]
+                        sim = simulations[sim_idx]
+                        frame = last_frames[sim_idx]
+                        field = config['field']
+                        if field in frame:
+                            data = frame[field].copy()
+                            if field in ['sigma_eq', 'sigma_h']:
+                                data = data / 1e9
+                            elif field == 'sigma_y':
+                                data = data / 1e6
+                            extent = [-sim['params']['N']*sim['params']['dx']/2,
+                                      sim['params']['N']*sim['params']['dx']/2] * 2
+                            im = ax.imshow(data, extent=extent, cmap='viridis',
+                                          origin='lower')
+                            ax.set_title(sim_names[sim_idx][:30] + "...", fontsize=8)
+                            ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
+                            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    for idx in range(len(valid_indices), len(axes)):
+                        axes[idx].axis('off')
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+            elif config['type'] == "Overlay Line Profiles":
+                fig = go.Figure()
+                ref_sim = simulations[0]
+                N = ref_sim['params']['N']; dx = ref_sim['params']['dx']
+                visualizer = EnhancedTwinVisualizer(N, dx)
+                for sim_idx, sim in enumerate(simulations):
+                    if not sim['results_history']:
+                        continue
+                    frame = sim['results_history'][-1]
+                    field = config['field']
+                    if field not in frame:
+                        continue
+                    distance, profile, _ = visualizer.line_profiler.extract_profile(
+                        frame[field], config['profile_direction'],
+                        config['position_ratio'], config.get('custom_angle', 45))
+                    if field in ['sigma_eq', 'sigma_h']:
+                        profile = profile / 1e9; ylabel = 'Stress (GPa)'
+                    elif field == 'sigma_y':
+                        profile = profile / 1e6; ylabel = 'Stress (MPa)'
+                    else:
+                        ylabel = field
+                    fig.add_trace(go.Scatter(x=distance, y=profile, mode='lines',
+                                             name=sim_names[sim_idx][:30]))
+                fig.update_layout(
+                    title=f"{field} Line Profiles Comparison",
+                    xaxis_title="Position (nm)", yaxis_title=ylabel,
+                    hovermode='x unified', template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
+            elif config['type'] == "Statistical Summary":
+                data = []
+                for sim in simulations:
+                    params = sim['params']; hist = sim['results_history']
+                    if hist:
+                        last = hist[-1].get('convergence', {})
+                        row = {
+                            'Name': build_sim_name(params, sim['id'])[:40],
+                            'λ (nm)': params.get('twin_spacing', 0),
+                            'σ_app (MPa)': params.get('applied_stress', 0)/1e6,
+                            'θ (deg)': params.get('applied_stress_angle', 0),
+                            'W (J/m³)': params.get('W', 0),
+                            'Avg σ_eq (GPa)': last.get('avg_stress', 0)/1e9,
+                            'Max σ_eq (GPa)': last.get('max_stress', 0)/1e9,
+                            'Avg h (nm)': last.get('avg_spacing', 0),
+                            'Plastic Work (J)': last.get('plastic_work', 0),
+                            'Energy (J)': last.get('energy', 0)}
+                        data.append(row)
+                if data:
+                    df = pd.DataFrame(data)
+                    st.dataframe(df)
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=df['Name'], y=df['Avg σ_eq (GPa)'],
+                                        name='Avg Stress'))
+                    fig.add_trace(go.Bar(x=df['Name'], y=df['Max σ_eq (GPa)'],
+                                        name='Max Stress'))
+                    fig.update_layout(title="Stress Comparison",
+                                     xaxis_title="Simulation",
+                                     yaxis_title="Stress (GPa)")
+                    st.plotly_chart(fig, use_container_width=True)
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(x=df['λ (nm)'], y=df['Avg σ_eq (GPa)'],
+                                             mode='markers+text',
+                                             text=df['Name'], textposition='top center'))
+                    fig2.update_layout(title="Twin Spacing vs. Avg Stress",
+                                      xaxis_title="λ (nm)",
+                                      yaxis_title="Avg Stress (GPa)")
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.warning("No convergence data available.")
+            elif config['type'] == "Correlation Analysis":
+                data = []
+                for sim in simulations:
+                    params = sim['params']; hist = sim['results_history']
+                    if hist and 'convergence' in hist[-1]:
+                        conv = hist[-1]['convergence']
+                        row = {
+                            'twin_spacing': params.get('twin_spacing', 0),
+                            'applied_stress': params.get('applied_stress', 0)/1e6,
+                            'W': params.get('W', 0),
+                            'avg_stress': conv.get('avg_stress', 0)/1e9,
+                            'max_stress': conv.get('max_stress', 0)/1e9,
+                            'avg_spacing': conv.get('avg_spacing', 0),
+                            'plastic_work': conv.get('plastic_work', 0)}
+                        data.append(row)
+                if data:
+                    df = pd.DataFrame(data)
+                    fig = go.Figure(data=go.Splom(
+                        dimensions=[dict(label=k, values=df[k]) for k in df.columns],
+                        showupperhalf=False, marker=dict(size=8)))
+                    fig.update_layout(title="Correlation Matrix",
+                                     width=800, height=800)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No convergence data available.")
+            elif config['type'] == "Evolution Timeline":
+                metric_map = {
+                    'phi': 'phi_norm', 'sigma_eq': 'avg_stress',
+                    'h': 'twin_spacing_avg', 'energy': 'energy',
+                    'plastic_work': 'plastic_work'}
+                chosen_metric = st.selectbox("Metric to track", list(metric_map.keys()))
+                fig = go.Figure()
+                for sim_idx, sim in enumerate(simulations):
+                    hist = sim.get('history') if 'history' in sim else None
+                    if hist is None and 'solver' in sim:
+                        hist = sim['solver'].history
+                    if hist is None:
+                        continue
+                    metric_key = metric_map.get(chosen_metric, chosen_metric)
+                    if metric_key not in hist:
+                        continue
+                    times = np.arange(len(hist[metric_key])) * sim['params'].get('dt', 1e-4)
+                    values = hist[metric_key]
+                    if chosen_metric in ['sigma_eq']:
+                        values = np.array(values) / 1e9
+                    fig.add_trace(go.Scatter(x=times, y=values, mode='lines',
+                                             name=sim_names[sim_idx][:30]))
+                fig.update_layout(
+                    title=f"{chosen_metric} Evolution Comparison",
+                    xaxis_title="Time (ns)", yaxis_title=chosen_metric,
+                    hovermode='x unified', template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
+   
+    elif operation_mode == "Single Simulation View" and 'selected_sim_id' in st.session_state:
+        sim_id = st.session_state.selected_sim_id
+        sim_data = SimulationDatabase.get_simulation(sim_id)
+        if sim_data:
+            st.header(f"📊 Single Simulation: {build_sim_name(sim_data['params'], sim_id)}")
+            params = sim_data['params']
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("λ (twin spacing)", f"{params.get('twin_spacing', 0):.1f} nm")
+            with col2:
+                stress_mag = params.get('applied_stress', 0)/1e6
+                angle = params.get('applied_stress_angle', 0)
+                st.metric("σ_app / θ", f"{stress_mag:.0f} MPa / {angle:.0f}°")
+            with col3:
+                st.metric("W (well depth)", f"{params.get('W', 0):.2f} J/m³")
+            with col4:
+                st.metric("κ₀", f"{params.get('kappa0', 0):.2f}")
+            history = sim_data.get('results_history', [])
+            if history:
+                num_frames = len(history)
+                frame_idx = st.slider("Frame", 0, num_frames-1, num_frames-1,
+                                     key=f"frame_slider_{sim_id}")
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col1:
+                    if st.button("⏮️ First"):
+                        st.session_state[f"frame_slider_{sim_id}"] = 0
+                        st.rerun()
+                with col2:
+                    play = st.checkbox("▶️ Play", key=f"play_{sim_id}")
+                    if play:
+                        current = st.session_state.get(f"frame_slider_{sim_id}", 0)
+                        if current < num_frames - 1:
+                            st.session_state[f"frame_slider_{sim_id}"] = current + 1
+                        else:
+                            st.session_state[f"frame_slider_{sim_id}"] = 0
+                        st.rerun()
+                with col3:
+                    if st.button("⏭️ Last"):
+                        st.session_state[f"frame_slider_{sim_id}"] = num_frames - 1
+                        st.rerun()
+                results = history[frame_idx]
+                visualizer = EnhancedTwinVisualizer(
+                    params['N'], params['dx'], dt=params.get('dt', 1e-4))
+                style_params = {
+                    'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
+                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),
+                    'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
+                    'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
+                    'scalebar_color': params.get('scalebar_color', 'black'),
+                    'scalebar_fontsize': params.get('scalebar_fontsize', 10)}
+                fig = visualizer.create_multi_field_comparison(results, style_params)
+                if fig:
+                    st.pyplot(fig)
+                    plt.close(fig)
+                if st.button("🗑️ Delete This Simulation", key=f"delete_{sim_id}"):
+                    SimulationDatabase.delete_simulation(sim_id)
+                    if 'selected_sim_id' in st.session_state:
+                        del st.session_state.selected_sim_id
+                    st.success(f"Simulation {sim_id} deleted!")
+                    st.rerun()
+            else:
+                st.warning("No simulation history found.")
+        else:
+            st.error("Simulation not found.")
+   
+    elif operation_mode == "Run New Simulation" and 'initialized' in st.session_state:
+        params = st.session_state.initial_geometry['params']
+        N = params['N']; dx = params['dx']
+        visualizer = EnhancedTwinVisualizer(N, dx, dt=params.get('dt', 1e-4))
+       
+        tabs = st.tabs(["📐 Initial Geometry", "▶️ Run Simulation", "📊 Basic Results",
+                        "🔍 Advanced Analysis", "📊 Plotly Interactive",
+                        "🖥️ 3D Interactive", "📤 Enhanced Export"])
+       
+        with tabs[0]:
+            st.header("Initial Geometry Visualization")
+            geom_viz = st.session_state.initial_geometry['geom_viz']
+            phi = st.session_state.initial_geometry['phi']
+            eta1 = st.session_state.initial_geometry['eta1']
+            kx, ky, k2 = make_k_vectors(N, dx)
+            phi_gx, phi_gy = spectral_gradients(phi, kx, ky)
+            h = compute_twin_spacing_from_gradient(phi_gx, phi_gy)
+            initial_results = {'phi': phi, 'eta1': eta1, 'h': h}
+            style_params = {'eta1_cmap': 'Reds',
+                           'scalebar_color': params.get('scalebar_color', 'black'),
+                           'scalebar_fontsize': params.get('scalebar_fontsize', 10)}
+            fig = visualizer.create_multi_field_comparison(initial_results, style_params)
+            if fig:
+                st.pyplot(fig)
+                plt.close(fig)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                avg_spacing = np.mean(h[(h>5)&(h<50)]) if np.any((h>5)&(h<50)) else 0
+                st.metric("Avg Twin Spacing", f"{avg_spacing:.1f} nm")
+            with col2:
+                twin_area = np.sum(eta1 > 0.5) * dx**2
+                st.metric("Twin Grain Area", f"{twin_area:.0f} nm²")
+            with col3:
+                num_twins = np.sum(h < 20)
+                st.metric("Number of Twins", f"{num_twins:.0f}")
+       
+        with tabs[1]:
+            st.header("Run Simulation (Pure FFT Spectral Method)")
+            if st.button("▶️ Start Evolution", type="secondary", use_container_width=True):
+                with st.spinner("Running phase-field simulation (FFT)..."):
+                    try:
+                        solver = NanotwinnedCuSolver(params)
+                        solver.phi = st.session_state.initial_geometry['phi'].copy()
+                        solver.eta1 = st.session_state.initial_geometry['eta1'].copy()
+                        solver.eta2 = st.session_state.initial_geometry['eta2'].copy()
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        results_history = []
+                        timesteps = []
+                        monitoring_cols = st.columns(4)
+                        n_steps = params['n_steps']
+                        dt = params['dt']
+                        save_freq = params['save_frequency']
+                        for step in range(n_steps):
+                            status_text.text(f"Step {step+1}/{n_steps} | "
+                                            f"Time: {(step+1)*dt:.4f} ns")
+                            results = solver.step()
+                            if step % save_freq == 0:
+                                results_history.append(results.copy())
+                                timesteps.append(step * dt)
+                            progress_bar.progress((step + 1) / n_steps)
+                            if step % 10 == 0 and len(results_history) > 0:
+                                with monitoring_cols[0]:
+                                    st.metric("Avg Stress",
+                                              f"{np.mean(results['sigma_eq'])/1e9:.2f} GPa")
+                                with monitoring_cols[1]:
+                                    valid_h = results['h'][(results['h']>5)&(results['h']<50)]
+                                    avg_h = np.mean(valid_h) if len(valid_h) > 0 else 0
+                                    st.metric("Avg Spacing", f"{avg_h:.1f} nm")
+                                with monitoring_cols[2]:
+                                    st.metric("Max Plastic Strain",
+                                              f"{np.max(results['eps_p_mag']):.4f}")
+                                with monitoring_cols[3]:
+                                    st.metric("Energy",
+                                              f"{results['convergence']['energy']:.2e} J")
+                        st.success(f"✅ Simulation completed! Generated {len(results_history)} frames.")
+                        st.session_state.results_history = results_history
+                        st.session_state.timesteps = timesteps
+                        st.session_state.solver = solver
+                        start_time = datetime.now()
+                        sim_id = SimulationDatabase.save_simulation(
+                            params, results_history,
+                            st.session_state.initial_geometry,
+                            run_time=(datetime.now()-start_time).total_seconds())
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Simulation failed: {str(e)}")
+                        st.exception(e)
+       
+        with tabs[2]:
+            if 'results_history' in st.session_state:
+                st.header("Basic Results Visualization")
+                results_history = st.session_state.results_history
+                frame_idx = st.slider("Select frame", 0, len(results_history)-1,
+                                     len(results_history)-1)
+                results = results_history[frame_idx]
+                style_params = {
+                    'phi_cmap': params.get('cmap_phi', 'RdBu_r'),
+                    'eta1_cmap': params.get('cmap_eta1', 'Reds'),
+                    'sigma_eq_cmap': params.get('cmap_stress', 'hot'),
+                    'sigma_h_cmap': params.get('cmap_hydro', 'RdBu'),
+                    'scalebar_color': params.get('scalebar_color', 'black'),
+                    'scalebar_fontsize': params.get('scalebar_fontsize', 10)}
+                fig = visualizer.create_multi_field_comparison(results, style_params)
+                if fig:
+                    st.pyplot(fig)
+                    plt.close(fig)
+                st.subheader("Convergence Monitoring")
+                if hasattr(st.session_state, 'solver') and \
+                   st.session_state.solver.history['phi_norm']:
+                    full_timesteps = (np.arange(len(st.session_state.solver.history['phi_norm']))
+                                     * params['dt'])
+                    conv_fig = SimulationMonitor.create_convergence_plots(
+                        st.session_state.solver.history, full_timesteps)
+                    st.pyplot(conv_fig)
+                    plt.close(conv_fig)
+            else:
+                st.info("Run a simulation first.")
+       
+        with tabs[3]:
+            if 'results_history' in st.session_state:
+                st.header("Advanced Analysis Tools")
+                st.subheader("Line Profile Analysis")
+                results = st.session_state.results_history[-1]
+                col1, col2 = st.columns(2)
+                with col1:
+                    profile_types = st.multiselect(
+                        "Profile Directions",
+                        ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal"],
+                        default=["Horizontal", "Vertical"])
+                    position_ratio = st.slider("Position Ratio", 0.0, 1.0, 0.5, 0.1)
+                with col2:
+                    field_to_profile = st.selectbox(
+                        "Field to Profile",
+                        ["phi", "eta1", "sigma_eq", "sigma_h", "h", "sigma_y"],
+                        index=2)
+                profile_type_mapping = {
+                    "Horizontal": "horizontal", "Vertical": "vertical",
+                    "Diagonal": "diagonal", "Anti-Diagonal": "anti_diagonal"}
+                internal_types = [profile_type_mapping[pt] for pt in profile_types]
+                profiler = EnhancedLineProfiler(N, dx)
+                fig_profiles, axes = plt.subplots(len(internal_types), 1,
+                                                  figsize=(10, 4*len(internal_types)))
+                if len(internal_types) == 1:
+                    axes = [axes]
+                for idx, ptype in enumerate(internal_types):
+                    ax = axes[idx]
+                    distance, profile, _ = profiler.extract_profile(
+                        results[field_to_profile], ptype, position_ratio)
+                    if field_to_profile in ['sigma_eq', 'sigma_h']:
+                        profile = profile / 1e9; ylabel = 'Stress (GPa)'
+                    elif field_to_profile == 'sigma_y':
+                        profile = profile / 1e6; ylabel = 'Stress (MPa)'
+                    else:
+                        ylabel = field_to_profile
+                    ax.plot(distance, profile, 'b-', linewidth=2)
+                    ax.set_xlabel('Position (nm)')
+                    ax.set_ylabel(ylabel)
+                    ax.set_title(f'{ptype.replace("_", " ").title()} Profile')
+                    ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig_profiles)
+                plt.close(fig_profiles)
+            else:
+                st.info("Run a simulation first.")
+       
+        with tabs[4]:
+            if 'results_history' in st.session_state:
+                st.header("📊 Plotly Interactive Visualization (2D)")
+                results_history = st.session_state.results_history
+                plotly_field = st.selectbox(
+                    "Select field to visualize",
+                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
+                    index=0, key="plotly_2d_field")
+                frame_idx_plotly = st.slider("Frame", 0, len(results_history)-1,
+                                            len(results_history)-1, key="plotly_2d_frame")
+                results = results_history[frame_idx_plotly]
+                fig_heatmap = visualizer.create_plotly_heatmap(
+                    results, plotly_field, frame_idx_plotly)
+                if fig_heatmap:
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                st.markdown("---")
+                st.subheader("Interactive Line Profiles")
+                col1, col2 = st.columns(2)
+                with col1:
+                    profile_type_plotly = st.selectbox(
+                        "Profile direction",
+                        ["Horizontal", "Vertical", "Diagonal", "Anti-Diagonal"],
+                        key="plotly_2d_profile")
+                with col2:
+                    position_ratio_plotly = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
+                                                      key="plotly_2d_pos")
+                profile_type_mapping = {
+                    "Horizontal": "horizontal", "Vertical": "vertical",
+                    "Diagonal": "diagonal", "Anti-Diagonal": "anti_diagonal"}
+                internal_pt = profile_type_mapping.get(profile_type_plotly, "horizontal")
+                fig_line = visualizer.create_plotly_line_profiles(
+                    results, plotly_field, [internal_pt], position_ratio_plotly)
+                st.plotly_chart(fig_line, use_container_width=True)
+            else:
+                st.info("Run a simulation first to generate interactive plots.")
+       
+        with tabs[5]:
+            st.header("🖥️ 3D Interactive Surface Visualization")
+            if 'results_history' in st.session_state:
+                results_history = st.session_state.results_history
+                field_3d = st.selectbox(
+                    "Select field for 3D surface",
+                    ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag", "sigma_y"],
+                    index=1, key="3d_field")
+                frame_idx_3d = st.slider("Frame", 0, len(results_history)-1,
+                                        len(results_history)-1, key="3d_frame")
+                results = results_history[frame_idx_3d]
+                fig_3d = visualizer.create_plotly_3d_surface(results, field_3d, frame_idx_3d)
+                if fig_3d:
+                    st.plotly_chart(fig_3d, use_container_width=True)
+                    st.markdown("""
+                    **💡 Interactivity**:
+                    - **Rotate** by dragging, **zoom** with scroll, **pan** with right‑click drag.
+                    - Hover over the surface to see exact coordinates and field values.
+                    """)
+                else:
+                    st.warning(f"Field '{field_3d}' not available in current results.")
+            else:
+                st.info("Run a simulation first to generate 3D visualizations.")
+       
+        with tabs[6]:
+            st.header("📤 Enhanced Export")
+            if 'results_history' in st.session_state and st.session_state.results_history:
+                results_history = st.session_state.results_history
+                params = st.session_state.initial_geometry['params']
+                sim_id = SimulationDatabase.generate_id(params)
+                sim_name = build_sim_name(params, sim_id)
+                sim_data = {'metadata': MetadataManager.create_metadata(params, results_history),
+                            'params': params}
+                st.subheader("Export Simulation Data")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("📦 Pickle (PKL)"):
+                        buffer, fname = DataExporter.export_pkl(
+                            sim_data, params, results_history, sim_name)
+                        st.download_button("Download PKL", buffer, fname)
+                    if st.button("🔥 PyTorch (PT)"):
+                        buffer, fname = DataExporter.export_pt(
+                            sim_data, params, results_history, sim_name)
+                        st.download_button("Download PT", buffer, fname)
+                    if st.button("📄 SQL Dump"):
+                        buffer, fname = DataExporter.export_sql(
+                            sim_data, params, results_history, sim_name, sim_id,
+                            params['N'], params['dx'])
+                        st.download_button("Download SQL", buffer, fname)
+                with col2:
+                    if st.button("📊 CSV (ZIP)"):
+                        vis = EnhancedTwinVisualizer(params['N'], params['dx'])
+                        buffer, fname = DataExporter.export_csv(
+                            results_history, sim_name, vis.extent,
+                            params['N'], params['dx'])
+                        st.download_button("Download CSV ZIP", buffer, fname)
+                    if st.button("📋 JSON"):
+                        buffer, fname = DataExporter.export_json(
+                            sim_data, params, results_history, sim_name)
+                        st.download_button("Download JSON", buffer, fname)
+                    if st.button("📁 HDF5"):
+                        buffer, fname = DataExporter.export_hdf5(
+                            sim_data, params, results_history, sim_name,
+                            params['N'], params['dx'])
+                        if buffer:
+                            st.download_button("Download HDF5", buffer, fname)
+                with col3:
+                    st.subheader("Animation Export")
+                    anim_field = st.selectbox(
+                        "Field for animation",
+                        ["phi", "eta1", "sigma_eq", "sigma_h", "h", "eps_p_mag"],
+                        key="anim_field")
+                    anim_format = st.selectbox("Format", ["gif", "mp4"], key="anim_format")
+                    fps = st.slider("FPS", 1, 30, 5)
+                    if st.button("🎬 Generate Animation"):
+                        with st.spinner("Creating animation..."):
+                            vis = EnhancedTwinVisualizer(
+                                params['N'], params['dx'], dt=params.get('dt', 1e-4))
+                            anim_buffer = vis.create_animation(
+                                results_history, anim_field, anim_format, fps)
+                            if anim_buffer:
+                                st.download_button(
+                                    f"Download {anim_format.upper()}",
+                                    anim_buffer,
+                                    f"{sim_name}_{anim_field}.{anim_format}")
+                st.markdown("---")
+                st.subheader("Bulk Export All Simulations")
+                if st.button("📦 Export All Simulations"):
+                    vis = EnhancedTwinVisualizer(params['N'], params['dx'])
+                    bulk_buffer, bulk_fname = DataExporter.bulk_export_all_simulations(
+                        params['N'], params['dx'], vis.extent)
+                    if bulk_buffer:
+                        st.download_button("Download All Simulations ZIP",
+                                           bulk_buffer, bulk_fname)
+            else:
+                st.info("Run a simulation first to export data.")
+    
+    elif operation_mode == "Parameter Sweep" and 'sweep_results' in st.session_state:
+        st.header("📊 Parameter Sweep Results")
+        sweep_results = st.session_state.sweep_results
+        sweep_param = st.session_state.sweep_param
+        param_vals = []
+        avg_stress = []
+        max_stress = []
+        avg_spacing = []
+        plastic_work = []
+        for res in sweep_results:
+            if res['convergence'] is not None:
+                param_vals.append(res['param_value'])
+                conv = res['convergence']
+                avg_stress.append(conv.get('sigma_eq', 0) / 1e9
+                                  if isinstance(conv.get('sigma_eq'), (int, float)) else 0)
+                max_stress.append(conv.get('max_stress', 0) / 1e9)
+                avg_spacing.append(conv.get('twin_spacing_avg', 0))
+                plastic_work.append(conv.get('plastic_work', 0))
+        if sweep_param == 'applied_stress':
+            param_display = np.array(param_vals) / 1e6
+            param_label = "Applied Stress (MPa)"
+        else:
+            param_display = param_vals
+            param_label = sweep_param.replace('_', ' ').title()
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes[0,0].plot(param_display, avg_stress, 'o-', linewidth=2)
+        axes[0,0].set_xlabel(param_label)
+        axes[0,0].set_ylabel("Avg Von Mises Stress (GPa)")
+        axes[0,0].set_title("Stress vs Parameter")
+        axes[0,0].grid(True, alpha=0.3)
+        axes[0,1].plot(param_display, avg_spacing, 's-', color='green', linewidth=2)
+        axes[0,1].set_xlabel(param_label)
+        axes[0,1].set_ylabel("Avg Twin Spacing (nm)")
+        axes[0,1].set_title("Twin Spacing vs Parameter")
+        axes[0,1].grid(True, alpha=0.3)
+        axes[1,0].plot(param_display, plastic_work, 'd-', color='red', linewidth=2)
+        axes[1,0].set_xlabel(param_label)
+        axes[1,0].set_ylabel("Plastic Work (J)")
+        axes[1,0].set_title("Plastic Work vs Parameter")
+        axes[1,0].grid(True, alpha=0.3)
+        axes[1,1].plot(param_display, max_stress, '^-', color='purple',
+                       linewidth=2, label='Max')
+        axes[1,1].plot(param_display, avg_stress, 'o-', color='blue',
+                       linewidth=2, label='Avg')
+        axes[1,1].set_xlabel(param_label)
+        axes[1,1].set_ylabel("Stress (GPa)")
+        axes[1,1].set_title("Stress Extremes vs Parameter")
+        axes[1,1].legend()
+        axes[1,1].grid(True, alpha=0.3)
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+        df_sweep = pd.DataFrame({
+            param_label: param_display,
+            'Avg Stress (GPa)': avg_stress,
+            'Max Stress (GPa)': max_stress,
+            'Avg Spacing (nm)': avg_spacing,
+            'Plastic Work (J)': plastic_work})
+        st.dataframe(df_sweep)
+        if st.button("Clear Sweep Results"):
+            del st.session_state.sweep_results
+            del st.session_state.sweep_param
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
