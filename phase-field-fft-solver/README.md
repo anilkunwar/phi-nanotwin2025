@@ -1,4 +1,4 @@
-# Standalone FFT spectral method
+# Pure FFT-based Semi-Implicit Spectral Phase-Field model
 
   Phase-field evolution (Allen-Cahn equations for ϕ, η1, η2) and  Mechanical equilibrium (calculating stress and strain from eigenstrains) are solved using the FFT spectral method.
 
