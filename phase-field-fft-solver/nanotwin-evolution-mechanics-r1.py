@@ -897,16 +897,20 @@ class EnhancedTwinVisualizer:
         self.COLORMAPS = COLORMAPS.copy()
         custom = PublicationEnhancer.create_custom_colormaps()
         self.COLORMAPS.update(custom)
-
+    #
     @handle_errors
     def get_colormap(self, cmap_name):
+        """Get colormap by name with fallback"""
         if cmap_name in self.COLORMAPS:
             entry = self.COLORMAPS[cmap_name]
             if isinstance(entry, str):
-                return plt.cm.get_cmap(entry)
+                # FIX: Use plt.get_cmap() instead of plt.cm.get_cmap()
+                return plt.get_cmap(entry)
             else:
                 return entry
-        return plt.cm.get_cmap('viridis')
+        # FIX: Use plt.get_cmap() for the fallback as well
+        return plt.get_cmap('viridis')
+    
 
     @handle_errors
     def create_multi_field_comparison(self, results_dict, style_params=None):
