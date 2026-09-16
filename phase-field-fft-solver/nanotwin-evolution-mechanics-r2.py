@@ -120,13 +120,13 @@ def compute_yield_stress(h, sigma0, mu, b, nu):
 def update_plastic_strain(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
                           gamma0_dot, m, dt):
     """Vectorized J2 power-law plastic-strain update with physical clamps."""
-    MAX_OVERSTRESS = 3.0
-    MAX_PLASTIC_STRAIN = 1.0
+    MAX_OVERSTRESS =  1.0       # Changed from 3.0
+    MAX_PLASTIC_STRAIN = 0.1   # Changed from 1.0
     overstress = np.maximum(sigma_eq - sigma_y, 0.0) / np.maximum(sigma_y, 1e-9)
     overstress = np.minimum(overstress, MAX_OVERSTRESS)
     gamma_dot = gamma0_dot * overstress**m
     stress_dev = 2.0 / 3.0 * gamma_dot * dt
-    stress_dev = np.minimum(stress_dev, 0.05)
+    stress_dev = np.minimum(stress_dev, 0.001)  # Changed from 0.05
     d_xx = stress_dev
     d_yy = -0.5 * stress_dev
     d_xy = 0.5 * stress_dev
