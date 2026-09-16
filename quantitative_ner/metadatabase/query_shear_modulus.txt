@@ -1,1 +1,1 @@
-
+TITLE-ABS-KEY ( ( "shear modulus" OR "modulus of rigidity" ) AND ( copper OR "nanotwinned Cu" OR "nanocrystalline Cu" OR "nt-Cu" ) AND ( "Hall-Petch" OR "yield stress" OR "yield strength" OR plasticity OR "single crystal" OR polycrystalline ) )
