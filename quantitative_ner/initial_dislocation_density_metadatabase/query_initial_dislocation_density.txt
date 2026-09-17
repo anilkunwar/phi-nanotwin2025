@@ -1,1 +1,1 @@
-
+TITLE-ABS-KEY ( ( "initial dislocation density" OR "pre-existing dislocation density" OR "dislocation density" ) AND ( copper OR "nanotwinned Cu" OR "nanocrystalline Cu" OR "nt-Cu" ) AND ( "Taylor hardening" OR "Kocks-Mecking" OR "yield stress" OR "yield strength" OR "strain hardening" OR plasticity OR modeling OR simulation ) )
