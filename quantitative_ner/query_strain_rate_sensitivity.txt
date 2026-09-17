@@ -1,0 +1,1 @@
+TITLE-ABS-KEY ( ( "strain-rate sensitivity" OR "strain rate sensitivity" OR "rate sensitivity exponent" OR "rate sensitivity parameter" OR "SRS" ) AND ( copper OR "nanotwinned Cu" OR "nanocrystalline Cu" OR "nt-Cu" OR "ultrafine-grained Cu" ) AND ( "flow stress" OR "yield stress" OR "yield strength" OR plasticity OR "strain rate" OR "power law" OR modeling OR simulation ) )
