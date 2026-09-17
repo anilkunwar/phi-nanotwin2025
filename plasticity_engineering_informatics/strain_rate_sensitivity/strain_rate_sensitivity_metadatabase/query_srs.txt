@@ -1,0 +1,3 @@
+(abs:"strain rate sensitivity" OR abs:"strain-rate sensitivity" OR abs:"rate sensitivity" OR abs:"activation volume" OR abs:"thermally activated" OR abs:"strain-rate dependence") AND (abs:nanotwinned OR abs:nanotwin OR abs:"twin boundary" OR abs:"twin boundaries" OR abs:"twin spacing" OR abs:"deformation twinning" OR abs:copper)
+
+25 results
