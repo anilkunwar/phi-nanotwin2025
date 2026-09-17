@@ -1,0 +1,1 @@
+(abs:"Peierls stress" OR abs:"lattice friction" OR abs:"friction stress" OR abs:"lattice resistance" OR abs:"Hall-Petch" OR abs:"Peierls-Nabarro") AND (abs:copper OR abs:nanotwinned OR abs:"twin boundaries" OR abs:nanocrystalline OR abs:"molecular dynamics")
