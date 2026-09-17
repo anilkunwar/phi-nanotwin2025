@@ -220,27 +220,27 @@ def get_csv_files_from_folder(folder_path: str) -> List[Path]:
 #
 def find_metadatabase_folder() -> str:
     """
-    Auto-detect the strain_rate_sensitivity_metadatabase folder by checking common paths.
+    Auto-detect the reference_strain_rate_metadatabase folder by checking common paths.
     Uses os.path.join for all path operations.
 
     Returns:
-        String path to the first valid strain_rate_sensitivity_metadatabase folder found, or default fallback
+        String path to the first valid reference_strain_rate_metadatabase folder found, or default fallback
     """
     # Get the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Define candidate paths using os.path.join
     candidates = [
-        os.path.join(script_dir, "strain_rate_sensitivity_metadatabase"),
-        os.path.join(script_dir, "database", "strain_rate_sensitivity_metadatabase"),
-        os.path.join(script_dir, "data", "strain_rate_sensitivity_metadatabase"),
-        os.path.join(script_dir, "strain_rate_sensitivity_metadatabase", "csv"),
-        os.path.join(os.getcwd(), "strain_rate_sensitivity_metadatabase"),
-        os.path.join(os.getcwd(), "database", "strain_rate_sensitivity_metadatabase"),
-        os.path.join(os.getcwd(), "data", "strain_rate_sensitivity_metadatabase"),
-        "strain_rate_sensitivity_metadatabase",  # relative to cwd
-        os.path.join("database", "strain_rate_sensitivity_metadatabase"),  # relative to cwd
-        os.path.join("data", "strain_rate_sensitivity_metadatabase"),  # relative to cwd
+        os.path.join(script_dir, "reference_strain_rate_metadatabase"),
+        os.path.join(script_dir, "database", "reference_strain_rate_metadatabase"),
+        os.path.join(script_dir, "data", "reference_strain_rate_metadatabase"),
+        os.path.join(script_dir, "reference_strain_rate_metadatabase", "csv"),
+        os.path.join(os.getcwd(), "reference_strain_rate_metadatabase"),
+        os.path.join(os.getcwd(), "database", "reference_strain_rate_metadatabase"),
+        os.path.join(os.getcwd(), "data", "reference_strain_rate_metadatabase"),
+        "reference_strain_rate_metadatabase",  # relative to cwd
+        os.path.join("database", "reference_strain_rate_metadatabase"),  # relative to cwd
+        os.path.join("data", "reference_strain_rate_metadatabase"),  # relative to cwd
     ]
 
     for path in candidates:
