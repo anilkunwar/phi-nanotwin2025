@@ -1,1 +1,23 @@
-TITLE-ABS-KEY ( ( "epsilon 0" OR "epsilon dot 0" OR "gamma 0" OR "gamma dot 0" ) AND ( "s-1" OR "10-" ) AND ( copper OR Cu ) AND ( "constitutive" OR "Johnson-Cook" OR "power law" OR viscoplastic ) )
+TITLE-ABS-KEY (
+  ( "reference strain rate" OR "reference strain-rate" OR "reference plastic strain rate"
+    OR "reference shear rate" OR "characteristic strain rate" OR "characteristic plastic strain rate"
+    OR "normalized strain rate" OR "strain rate normalization" OR "strain-rate prefactor"
+    OR "strain rate prefactor" OR "ε̇₀" OR "ε̇0" OR "eps_0" OR "eps0"
+    OR "epsilon dot zero" OR "epsilon-dot-zero" )
+  W/12
+  ( copper OR Cu OR "nanotwinned Cu" OR "nanotwinned copper" OR "nt-Cu"
+    OR "nanotwin" OR "nanotwins" OR "nanotwinning" OR "twin boundary" OR "twin boundaries"
+    OR "twin lamellae" OR "twin spacing" )
+)
+AND
+TITLE-ABS-KEY (
+  ( "constitutive model" OR "constitutive equation" OR "constitutive relation"
+    OR "constitutive behavior" OR "constitutive description" OR "constitutive framework"
+    OR "power law" OR "power-law" OR "power law creep"
+    OR viscoplastic OR viscoplasticity OR "visco-plastic"
+    OR "strain-rate sensitivity" OR "strain rate sensitivity" OR "SRS" OR "m-value" OR "m value"
+    OR "flow stress" OR "flow curve"
+    OR "Johnson-Cook" OR "Zerilli-Armstrong" OR "mechanical threshold stress" OR "MTS model"
+    OR "thermal activation" OR "activation energy" OR "Arrhenius"
+    OR "dislocation mechanism" OR "twin boundary mediated" )
+)
