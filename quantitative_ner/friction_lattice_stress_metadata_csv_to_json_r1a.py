@@ -220,27 +220,27 @@ def get_csv_files_from_folder(folder_path: str) -> List[Path]:
 #
 def find_metadatabase_folder() -> str:
     """
-    Auto-detect the shear_modulus_metadatabase folder by checking common paths.
+    Auto-detect the friction_lattice_stress_metadatabase folder by checking common paths.
     Uses os.path.join for all path operations.
 
     Returns:
-        String path to the first valid shear_modulus_metadatabase folder found, or default fallback
+        String path to the first valid friction_lattice_stress_metadatabase folder found, or default fallback
     """
     # Get the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Define candidate paths using os.path.join
     candidates = [
-        os.path.join(script_dir, "shear_modulus_metadatabase"),
-        os.path.join(script_dir, "database", "shear_modulus_metadatabase"),
-        os.path.join(script_dir, "data", "shear_modulus_metadatabase"),
-        os.path.join(script_dir, "shear_modulus_metadatabase", "csv"),
-        os.path.join(os.getcwd(), "shear_modulus_metadatabase"),
-        os.path.join(os.getcwd(), "database", "shear_modulus_metadatabase"),
-        os.path.join(os.getcwd(), "data", "shear_modulus_metadatabase"),
-        "shear_modulus_metadatabase",  # relative to cwd
-        os.path.join("database", "shear_modulus_metadatabase"),  # relative to cwd
-        os.path.join("data", "shear_modulus_metadatabase"),  # relative to cwd
+        os.path.join(script_dir, "friction_lattice_stress_metadatabase"),
+        os.path.join(script_dir, "database", "friction_lattice_stress_metadatabase"),
+        os.path.join(script_dir, "data", "friction_lattice_stress_metadatabase"),
+        os.path.join(script_dir, "friction_lattice_stress_metadatabase", "csv"),
+        os.path.join(os.getcwd(), "friction_lattice_stress_metadatabase"),
+        os.path.join(os.getcwd(), "database", "friction_lattice_stress_metadatabase"),
+        os.path.join(os.getcwd(), "data", "friction_lattice_stress_metadatabase"),
+        "friction_lattice_stress_metadatabase",  # relative to cwd
+        os.path.join("database", "friction_lattice_stress_metadatabase"),  # relative to cwd
+        os.path.join("data", "friction_lattice_stress_metadatabase"),  # relative to cwd
     ]
 
     for path in candidates:
@@ -250,9 +250,6 @@ def find_metadatabase_folder() -> str:
             has_csv = any(f.lower().endswith('.csv') for f in os.listdir(normalized))
             if has_csv:
                 return path
-
-    # Return default fallback
-    return os.path.join("database", "shear_modulus_metadatabase")
 
 
 
