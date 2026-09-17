@@ -1,5 +1,5 @@
-TITLE-ABS-KEY ( "reference strain rate" OR "characteristic strain rate" OR "reference shear rate" OR "strain rate prefactor" OR "normalized strain rate" )
+TITLE-ABS-KEY ( "reference strain rate" OR "characteristic strain rate" )
 AND
-TITLE-ABS-KEY ( "nanotwinned copper" OR "nanotwinned Cu" OR "nt-Cu" OR "nanotwin*" )
+TITLE-ABS-KEY ( "copper" OR "Cu" )
 AND
-TITLE-ABS-KEY ( "constitutive" OR "power law" OR "viscoplastic*" OR "strain-rate sensitivity" OR "flow stress" )
+TITLE-ABS-KEY ( "nanotwin*" OR "constitutive model" OR "viscoplastic*" OR "Johnson-Cook" )
