@@ -1,1 +1,3 @@
 TITLE-ABS-KEY ( ( "friction stress" OR "lattice friction" OR "lattice resistance" OR "Peierls stress" OR "intrinsic lattice resistance" ) AND ( copper OR "nanotwinned Cu" OR "nanocrystalline Cu" OR "nt-Cu" ) AND ( "Hall-Petch" OR "yield stress" OR "yield strength" OR plasticity OR "dislocation motion" OR modeling OR simulation ) )
+
+59 results
