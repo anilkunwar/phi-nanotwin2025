@@ -1,1 +1,3 @@
 TITLE-ABS-KEY ( ( "reference strain rate" OR "characteristic strain rate" OR "reference shear rate" OR "reference plastic strain rate" ) AND ( copper OR "nanotwinned Cu" OR "nanocrystalline Cu" OR "nt-Cu" ) AND ( "power law" OR viscoplasticity OR "strain-rate sensitivity" OR "flow stress" OR plasticity OR "constitutive model" OR modeling OR simulation ) )
+
+6 results
