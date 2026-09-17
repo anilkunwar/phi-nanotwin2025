@@ -218,7 +218,7 @@ def get_csv_files_from_folder(folder_path: str) -> List[Path]:
     return csv_files
 
 #
-def find__folder() -> str:
+def find_metadatabase_folder() -> str:
     """
     Auto-detect the shear_modulus_metadatabase folder by checking common paths.
     Uses os.path.join for all path operations.
