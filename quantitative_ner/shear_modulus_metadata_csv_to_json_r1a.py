@@ -217,30 +217,30 @@ def get_csv_files_from_folder(folder_path: str) -> List[Path]:
 
     return csv_files
 
-
-def find_metadatabase_folder() -> str:
+#
+def find__folder() -> str:
     """
-    Auto-detect the metadatabase folder by checking common paths.
+    Auto-detect the shear_modulus_metadatabase folder by checking common paths.
     Uses os.path.join for all path operations.
 
     Returns:
-        String path to the first valid metadatabase folder found, or default fallback
+        String path to the first valid shear_modulus_metadatabase folder found, or default fallback
     """
     # Get the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Define candidate paths using os.path.join
     candidates = [
-        os.path.join(script_dir, "metadatabase"),
-        os.path.join(script_dir, "database", "metadatabase"),
-        os.path.join(script_dir, "data", "metadatabase"),
-        os.path.join(script_dir, "metadatabase", "csv"),
-        os.path.join(os.getcwd(), "metadatabase"),
-        os.path.join(os.getcwd(), "database", "metadatabase"),
-        os.path.join(os.getcwd(), "data", "metadatabase"),
-        "metadatabase",  # relative to cwd
-        os.path.join("database", "metadatabase"),  # relative to cwd
-        os.path.join("data", "metadatabase"),  # relative to cwd
+        os.path.join(script_dir, "shear_modulus_metadatabase"),
+        os.path.join(script_dir, "database", "shear_modulus_metadatabase"),
+        os.path.join(script_dir, "data", "shear_modulus_metadatabase"),
+        os.path.join(script_dir, "shear_modulus_metadatabase", "csv"),
+        os.path.join(os.getcwd(), "shear_modulus_metadatabase"),
+        os.path.join(os.getcwd(), "database", "shear_modulus_metadatabase"),
+        os.path.join(os.getcwd(), "data", "shear_modulus_metadatabase"),
+        "shear_modulus_metadatabase",  # relative to cwd
+        os.path.join("database", "shear_modulus_metadatabase"),  # relative to cwd
+        os.path.join("data", "shear_modulus_metadatabase"),  # relative to cwd
     ]
 
     for path in candidates:
@@ -252,7 +252,8 @@ def find_metadatabase_folder() -> str:
                 return path
 
     # Return default fallback
-    return os.path.join("database", "metadatabase")
+    return os.path.join("database", "shear_modulus_metadatabase")
+
 
 
 def process_file_from_path(file_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
