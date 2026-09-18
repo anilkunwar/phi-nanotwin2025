@@ -33,6 +33,8 @@ import time
 import threading
 import logging
 import pandas as pd
+from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass, field
 
 # Optional HDF5 export
 try:
