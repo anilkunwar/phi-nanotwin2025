@@ -22,3 +22,4 @@ ollama
 kaleido
 holoviews
 bokeh
+scipy
