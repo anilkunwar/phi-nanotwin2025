@@ -1,6 +1,7 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
 # ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.0              ███
+# ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                   ███
 # ============================================================================
 
 import numpy as np
@@ -33,8 +34,8 @@ import time
 import threading
 import logging
 import pandas as pd
-from typing import Dict, List, Any, Optional, Tuple   # ← ADDED (fix NameError)
-from dataclasses import dataclass, field              # ← ADDED (fix NameError)
+from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass, field
 
 # Optional HDF5 export
 try:
@@ -1238,7 +1239,7 @@ class EnhancedTwinVisualizer:
 
 
 # ============================================================================
-# MAIN SOLVER (PURE FFT SPECTRAL METHOD)  ← HOOK #1 APPLIED BELOW
+# MAIN SOLVER (PURE FFT SPECTRAL METHOD)
 # ============================================================================
 class NanotwinnedCuSolver:
     """Main solver with pure-FFT semi-implicit spectral time integration.
@@ -1254,9 +1255,8 @@ class NanotwinnedCuSolver:
         self.mat_props = MaterialProperties.get_material(material_name)
         self.params['material'] = material_name
 
-        # ▼▼▼ HOOK #1: Apply LLM-recommended plasticity overrides if present ▼▼▼
+        # Apply LLM-recommended plasticity overrides if present
         apply_plasticity_overrides(self)
-        # ▲▲▲ END HOOK #1 ▲▲▲
 
         errors, warnings_list = MaterialProperties.validate_parameters(params)
         if errors:
@@ -1894,7 +1894,7 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.0               ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.0.1             ██████
 # ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors ·    ██████
 # ███  Histograms · Per-parameter sidebar selectors                    ██████
 # ███████████████████████████████████████████████████████████████████████████
@@ -2947,7 +2947,7 @@ class PlasticityRecommender:
 
 
 # ============================================================================
-# OLLAMA MODEL REGISTRY   ← NEW (dropdown source of truth)
+# OLLAMA MODEL REGISTRY
 # ============================================================================
 OLLAMA_MODELS: Dict[str, str] = {
     "⚡ Fallback (Rule-based, no LLM)": "",
@@ -3073,8 +3073,13 @@ def _plr_render_parameter_selector(param: str,
             f"method={chosen.method}, conf={chosen.confidence:.2f}"
             + (" | ⚠️ clamped" if chosen.clamped else "")
         )
+        # -----------------------------------------------------------------
+        # FIX: Expanded-into-container (was `with st.expander("Evidence
+        # snippet")`, which is illegal inside the outer sidebar expander).
+        # -----------------------------------------------------------------
         if chosen.evidence:
-            with st.expander("Evidence snippet"):
+            st.markdown("**📚 Evidence snippet**")
+            with st.container():
                 st.code(chosen.evidence, language="text")
 
     st.session_state[f"{_PLR}{param}_value_si"] = value_si
@@ -3110,15 +3115,13 @@ def render_plasticity_recommender_sidebar(
     )
 
     # ────────────────────────────────────────────────────────────────────────
-    # ▼▼▼ UPGRADE: dropdown menu of Ollama models (replaces st.text_input) ▼▼▼
+    # Dropdown menu of Ollama models
     # ────────────────────────────────────────────────────────────────────────
     model_options = _build_ollama_dropdown_options()
 
     current_model_name = ollama_model if ollama_model else "qwen2.5:7b"
     display_options = list(model_options.keys())
 
-    # Prefer the entry whose *value* matches the current default; else fall
-    # back to the recommended entry; else the very first entry.
     display_name_for_current = next(
         (k for k, v in model_options.items() if v == current_model_name),
         next(
@@ -3145,13 +3148,10 @@ def render_plasticity_recommender_sidebar(
     )
     ollama_model = model_options.get(selected_display, "")
 
-    # Force fallback mode if the user selected the no-LLM option
     if not ollama_model:
         llm_ok = False
     else:
         llm_ok = PlasticityOllamaClient.is_available()
-    # ▲▲▲ END UPGRADE ▲▲▲
-    # ────────────────────────────────────────────────────────────────────────
 
     backend_txt = (
         "faiss+dense" if FAISS_AVAILABLE and SBERT_AVAILABLE
@@ -3250,9 +3250,12 @@ def render_plasticity_recommender_sidebar(
     st.markdown("### 📊 Candidate Distributions")
     render_plasticity_candidate_histograms(bundle.candidates)
 
+    # ---------------------------------------------------------------------
+    # FIX: prior table — replace nested expander with container
+    # ---------------------------------------------------------------------
     if not bundle.priors_df.empty:
-        with st.expander("📚 Learned per‑material priors (from corpus)",
-                         expanded=False):
+        st.markdown("**📚 Learned per‑material priors (from corpus)**")
+        with st.container():
             st.caption(
                 "Aggregated from all heuristic extractions in the corpus. "
                 "Use this to sanity‑check values for materials not directly "
@@ -3266,7 +3269,11 @@ def render_plasticity_recommender_sidebar(
                     )
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with st.expander("📋 Full candidate audit (LatentMoE ranking)"):
+    # ---------------------------------------------------------------------
+    # FIX: full candidate audit — replace nested expander with container
+    # ---------------------------------------------------------------------
+    st.markdown("**📋 Full candidate audit (LatentMoE ranking)**")
+    with st.container():
         for param in PARAM_ORDER:
             st.markdown(f"**{PLASTICITY_ONTOLOGY[param]['label']}**")
             cands = bundle.candidates.get(param, [])
@@ -3296,7 +3303,7 @@ def apply_plasticity_overrides(solver) -> None:
 
 
 # ============================================================================
-# MAIN STREAMLIT APP  ← HOOK #2 APPLIED BELOW
+# MAIN STREAMLIT APP
 # ============================================================================
 def main():
     st.set_page_config(
@@ -3323,11 +3330,12 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.0:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.0.1:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🤖 AI RECOMMENDER:</span> FAISS + Ollama + LatentMoE + learned priors.<br>
     • <span style="color: green;">LIVE HISTOGRAMS:</span> per-parameter candidate distributions.<br>
+    • <span style="color: green;">NESTED-EXPANDER FIX:</span> uses containers inside outer expander.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -3361,7 +3369,7 @@ def main():
 
         st.markdown("---")
 
-        # ▼▼▼ HOOK #2: AI Plasticity Recommender sidebar ▼▼▼
+        # ▼▼▼ AI Plasticity Recommender sidebar ▼▼▼
         with st.expander("🧠 AI Plasticity Recommender v8", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
@@ -3370,7 +3378,7 @@ def main():
                 ollama_model="qwen2.5:7b",
             )
         st.markdown("---")
-        # ▲▲▲ END HOOK #2 ▲▲▲
+        # ▲▲▲ END AI Plasticity Recommender sidebar ▲▲▲
 
         operation_mode = st.radio(
             "Operation Mode",
@@ -3964,7 +3972,6 @@ def main():
         with tabs[1]:
             st.header("Run Simulation (Pure FFT Spectral Method)")
 
-            # Show active plasticity overrides (if any)
             _active_overrides = st.session_state.get("plasticity_overrides", {})
             if _active_overrides:
                 st.info(
@@ -3976,9 +3983,6 @@ def main():
                 with st.spinner("Running phase-field simulation (FFT)..."):
                     try:
                         solver = NanotwinnedCuSolver(params)
-                        # apply_plasticity_overrides(self) is already called
-                        # inside NanotwinnedCuSolver.__init__, so the overrides
-                        # have been merged into solver.mat_props['plasticity'].
                         solver.phi = st.session_state.initial_geometry['phi'].copy()
                         solver.eta1 = st.session_state.initial_geometry['eta1'].copy()
                         solver.eta2 = st.session_state.initial_geometry['eta2'].copy()
