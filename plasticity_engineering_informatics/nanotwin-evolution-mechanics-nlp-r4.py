@@ -3042,7 +3042,8 @@ def _plr_render_parameter_selector(param: str,
             + (" | ⚠️ clamped" if chosen.clamped else "")
         )
         if chosen.evidence:
-            with st.expander("Evidence snippet"):
+            st.caption("📚 Evidence snippet")
+            with st.container():
                 st.code(chosen.evidence, language="text")
 
     st.session_state[f"{_PLR}{param}_value_si"] = value_si
@@ -3176,8 +3177,8 @@ def render_plasticity_recommender_sidebar(
     render_plasticity_candidate_histograms(bundle.candidates)
 
     if not bundle.priors_df.empty:
-        with st.expander("📚 Learned per‑material priors (from corpus)",
-                         expanded=False):
+        st.markdown("**📚 Learned per‑material priors (from corpus)**")
+        with st.container():
             st.caption(
                 "Aggregated from all heuristic extractions in the corpus. "
                 "Use this to sanity‑check values for materials not directly "
@@ -3191,7 +3192,8 @@ def render_plasticity_recommender_sidebar(
                     )
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with st.expander("📋 Full candidate audit (LatentMoE ranking)"):
+    st.markdown("**📋 Full candidate audit (LatentMoE ranking)**")
+    with st.container():
         for param in PARAM_ORDER:
             st.markdown(f"**{PLASTICITY_ONTOLOGY[param]['label']}**")
             cands = bundle.candidates.get(param, [])
