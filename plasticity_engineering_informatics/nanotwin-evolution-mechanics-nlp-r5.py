@@ -33,6 +33,8 @@ import time
 import threading
 import logging
 import pandas as pd
+from typing import Dict, List, Any, Optional, Tuple   # ← ADDED (fix NameError)
+from dataclasses import dataclass, field              # ← ADDED (fix NameError)
 
 # Optional HDF5 export
 try:
@@ -2944,6 +2946,38 @@ class PlasticityRecommender:
         )
 
 
+# ============================================================================
+# OLLAMA MODEL REGISTRY   ← NEW (dropdown source of truth)
+# ============================================================================
+OLLAMA_MODELS: Dict[str, str] = {
+    "⚡ Fallback (Rule-based, no LLM)": "",
+    "🦙 qwen2.5:0.5b (Fastest, CPU OK)": "qwen2.5:0.5b",
+    "🦙 qwen2.5:1.5b (Balanced)": "qwen2.5:1.5b",
+    "🦙 qwen2.5:7b (Recommended for RAG)": "qwen2.5:7b",
+    "🦙 qwen2.5:14b (Max Reasoning)": "qwen2.5:14b",
+    "🦙 llama3.1:8b (Meta Standard)": "llama3.1:8b",
+    "🦙 mistral:7b (High JSON Reliability)": "mistral:7b",
+    "🦙 gemma2:9b (Scientific Nuance)": "gemma2:9b",
+    "🦙 falcon3:10b (Instruction Following)": "falcon3:10b",
+}
+
+
+def _build_ollama_dropdown_options() -> Dict[str, str]:
+    """Return the ordered display-name → model-name mapping used by the
+    sidebar dropdown.  Starts from the static OLLAMA_MODELS registry and
+    appends any models that are actually installed on the local Ollama
+    instance (if it is reachable).  Preserves order and de-duplicates."""
+    options: Dict[str, str] = dict(OLLAMA_MODELS)  # preserve order
+    installed = PlasticityOllamaClient.list_models()
+    existing_names = set(options.values())
+    for name in installed:
+        if not name or name in existing_names:
+            continue
+        options[f"🦙 {name} (Installed locally)"] = name
+        existing_names.add(name)
+    return options
+
+
 # ----------------------------------------------------------------------------
 # SIDEBAR UI
 # ----------------------------------------------------------------------------
@@ -3074,11 +3108,51 @@ def render_plasticity_recommender_sidebar(
         "Reference strain rate (s⁻¹)",
         value=float(default_strain_rate), format="%.2e", key=f"{_PLR}rate",
     )
-    ollama_model = st.text_input(
-        "Ollama model", value=ollama_model, key=f"{_PLR}ollama_model"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ▼▼▼ UPGRADE: dropdown menu of Ollama models (replaces st.text_input) ▼▼▼
+    # ────────────────────────────────────────────────────────────────────────
+    model_options = _build_ollama_dropdown_options()
+
+    current_model_name = ollama_model if ollama_model else "qwen2.5:7b"
+    display_options = list(model_options.keys())
+
+    # Prefer the entry whose *value* matches the current default; else fall
+    # back to the recommended entry; else the very first entry.
+    display_name_for_current = next(
+        (k for k, v in model_options.items() if v == current_model_name),
+        next(
+            (k for k in display_options if "Recommended" in k),
+            display_options[0] if display_options else "",
+        ),
+    )
+    default_idx = (
+        display_options.index(display_name_for_current)
+        if display_name_for_current in display_options
+        else 0
     )
 
-    llm_ok = PlasticityOllamaClient.is_available()
+    selected_display = st.selectbox(
+        "Ollama model",
+        options=display_options,
+        index=default_idx,
+        key=f"{_PLR}ollama_model_select",
+        help=(
+            "Pick '⚡ Fallback' to use the built-in heuristic extractor "
+            "(no LLM). Locally-installed models detected via Ollama's /api/tags "
+            "are appended automatically."
+        ),
+    )
+    ollama_model = model_options.get(selected_display, "")
+
+    # Force fallback mode if the user selected the no-LLM option
+    if not ollama_model:
+        llm_ok = False
+    else:
+        llm_ok = PlasticityOllamaClient.is_available()
+    # ▲▲▲ END UPGRADE ▲▲▲
+    # ────────────────────────────────────────────────────────────────────────
+
     backend_txt = (
         "faiss+dense" if FAISS_AVAILABLE and SBERT_AVAILABLE
         else "numpy+dense" if SBERT_AVAILABLE
@@ -3086,8 +3160,11 @@ def render_plasticity_recommender_sidebar(
     )
     bc1, bc2 = st.columns(2)
     with bc1:
-        st.caption(f"{'✅' if llm_ok else '⚠️'} Ollama "
-                   f"{'available' if llm_ok else 'unreachable'}")
+        if not ollama_model:
+            st.caption("⚡ LLM disabled — using heuristic extractor")
+        else:
+            st.caption(f"{'✅' if llm_ok else '⚠️'} Ollama "
+                       f"{'available' if llm_ok else 'unreachable'}")
     with bc2:
         st.caption(f"🔎 Retrieval: `{backend_txt}`")
 
@@ -3117,7 +3194,7 @@ def render_plasticity_recommender_sidebar(
 
     if run_btn:
         recommender = PlasticityRecommender(
-            ollama_model=ollama_model, use_llm=llm_ok,
+            ollama_model=ollama_model or "qwen2.5:7b", use_llm=llm_ok,
         )
         progress = st.progress(0.0)
         status = st.empty()
