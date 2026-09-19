@@ -2334,7 +2334,7 @@ class PlasticityFAISSRetriever:
 
     def _tfidf_fallback_vectors(self, corpus):
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.featureion.text import TfidfVectorizer
             vec = TfidfVectorizer(max_features=2048, stop_words="english")
             X = vec.fit_transform([d["text"] for d in corpus]).toarray().astype(np.float32)
             norms = np.linalg.norm(X, axis=1, keepdims=True) + 1e-12
@@ -2445,7 +2445,31 @@ _EXTRACT_SCHEMA = (
 #\"\"\"{text}\"\"\"
 #"""
 # ==================================================================================
-#THIS PROMPT ALLOWS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING
+#THIS PROMPT ALLOWS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING FOR GAMMA0_DOT ONLY
+# ====================================================================================
+#_EXTRACT_PROMPT = """You are an expert materials-science AI system.
+#Extract the following five plasticity parameters from the text:
+# 1. rho0        - initial dislocation density              [m^-2]
+# 2. mu          - shear modulus                            [Pa or GPa]
+#  3. gamma0_dot  - reference strain rate                    [s^-1]
+#  4. srs         - strain-rate sensitivity exponent (m)     [dimensionless]
+#  5. sigma0      - friction / initial yield stress          [Pa or MPa]
+#Target context:
+#  Material       = "{material}"
+#  Temperature    = "{temp_k}" K
+#  Strain rate    = "{strain_rate}" s^-1
+#Rules for extraction:
+#1. If a parameter is explicitly stated in the text, extract it exactly and set confidence > 0.8.
+#2. If 'gamma0_dot' (reference strain rate) is NOT explicitly stated in the text, INFER a value of 0.001 s^-1 (which is the standard quasi-static rate for this solver). Set method to "LLM_inferred" and confidence to 0.4.
+#3. For rho0, mu, srs, and sigma0: Do NOT infer values if they are missing. Omit them instead.
+#Return ONLY a JSON ARRAY of objects. Each object must match this schema:
+#  {schema}
+#Do NOT include markdown, comments, or explanations.
+#TEXT:
+#\"\"\"{text}\"\"\"
+#"""
+# ==================================================================================
+#THIS PROMPT ALLOWS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING FOR ALL PARAMS IF NOT FOUND IN JSON FILE
 # ====================================================================================
 _EXTRACT_PROMPT = """You are an expert materials-science AI system.
 Extract the following five plasticity parameters from the text:
@@ -2462,8 +2486,13 @@ Target context:
 
 Rules for extraction:
 1. If a parameter is explicitly stated in the text, extract it exactly and set confidence > 0.8.
-2. If 'gamma0_dot' (reference strain rate) is NOT explicitly stated in the text, INFER a value of 0.001 s^-1 (which is the standard quasi-static rate for this solver). Set method to "LLM_inferred" and confidence to 0.4.
-3. For rho0, mu, srs, and sigma0: Do NOT infer values if they are missing. Omit them instead.
+2. If ANY of the five parameters are NOT explicitly stated, use your materials science knowledge to INFER a statistically reasonable value for the target material ({material}). Set method to "LLM_inferred" and confidence to 0.4.
+3. When inferring values, treat the baseline textbook values as the statistical MEAN. Adjust your inferred value around this mean based on the physical context, temperature, or processing history mentioned in the text:
+   - gamma0_dot: Mean is 1e-3 s^-1. Vary between 5e-4 and 2e-3 depending on context.
+   - rho0: Mean is 1e12 m^-2. If the text implies heavy deformation or high temperature, infer higher (e.g., 3e12 to 1e13). If well-annealed, infer lower (e.g., 5e11).
+   - srs: Mean is 20.0. Vary between 15.0 and 30.0 depending on the implied rate sensitivity of the alloy.
+   - mu: Mean is 48 GPa (Cu), 26 GPa (Al), or 80 GPa (Ni). Vary by ±2 GPa based on the target temperature.
+   - sigma0: Mean is 50 MPa (Cu), 30 MPa (Al), or 70 MPa (Ni). Vary by ±15 MPa based on solid solution or precipitation strengthening implied in the text.
 
 Return ONLY a JSON ARRAY of objects. Each object must match this schema:
   {schema}
