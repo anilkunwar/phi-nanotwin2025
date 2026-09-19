@@ -3458,14 +3458,18 @@ class RecommenderVisualStyle:
             margin=dict(l=70, r=40, t=80, b=60),
         )
         if self.grid:
+            # NOTE: Plotly.py property names are ALL-LOWERCASE.
+            #   ❌ gridDash  → ✅ griddash
+            #   ❌ gridColor → ✅ gridcolor
+            #   ❌ gridWidth → ✅ gridwidth
             fig.update_xaxes(showgrid=True,
                              gridcolor='rgba(128,128,128,0.3)',
                              gridwidth=0.5,
-                             gridDash='dash')
+                             griddash='dash')
             fig.update_yaxes(showgrid=True,
                              gridcolor='rgba(128,128,128,0.3)',
                              gridwidth=0.5,
-                             gridDash='dash')
+                             griddash='dash')
         else:
             fig.update_xaxes(showgrid=False)
             fig.update_yaxes(showgrid=False)
