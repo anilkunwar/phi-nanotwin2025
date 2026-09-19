@@ -1,10 +1,14 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.1              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.2.0              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                   ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)               ███
 # ███ FIX: LLM-DRIVEN PRIOR LEARNER + OLLAMA RAW RESPONSE DEBUG (v8.1.2)███
+# ███ NEW: DUAL-MODE PROMPTS + CHAIN-OF-THOUGHT REASONING (v8.2.0)      ███
+# ███   · strict_extract  → prior learning (explicit values only)       ███
+# ███   · reasoned_inference → runtime recommendation (CoT for gaps)    ███
+# ███   · reasoning field surfaced in UI, scored by LatentMoE           ███
 # ============================================================================
 
 import numpy as np
@@ -775,7 +779,7 @@ class MaterialProperties:
                 'a_2d': np.array([1 / np.sqrt(2), -1 / np.sqrt(2)])
             },
             'plasticity': {'mu': 80e9, 'nu': 0.31, 'b': 0.249e-9,
-                           'sigma0': 70e6, 'gamma0_dot': 1e-3, 'm': 20, 'rho0': 1e12}
+                           'sigma0': 70e6, 'gamma0_dot': 1e-3, 'm': 20, 'rho0': 1e13}
         }
 
     @staticmethod
@@ -1323,9 +1327,15 @@ class NanotwinnedCuSolver:
         }
 
         # ---- Implicit baseline for the semi-implicit Fourier update ----
+        # Raised to the maximal anisotropic upper bound so the explicit
+        # correction term is always non-positive at CTBs.
         kappa0 = float(params.get('kappa0', 1.0))
+        gamma_aniso = float(params.get('gamma_aniso', 0.7))
         L_CTB = float(params.get('L_CTB', 0.05))
-        self.implicit_diff_phi = L_CTB * kappa0
+        L_ITB = float(params.get('L_ITB', 5.0))
+        # Use the *upper bound* (L_ITB × κ₀ × (1+γ_aniso)) as the implicit
+        # stabiliser, since L_phi·κ_phi can reach that at CTBs.
+        self.implicit_diff_phi = L_ITB * kappa0 * (1.0 + gamma_aniso)
         kappa_eta = float(params.get('kappa_eta', 2.0))
         L_eta = float(params.get('L_eta', 1.0))
         self.implicit_diff_eta = L_eta * kappa_eta
@@ -1664,6 +1674,8 @@ class NumpyEncoder(json.JSONEncoder):
             return int(obj)
         elif isinstance(obj, np.floating):
             return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
@@ -1802,18 +1814,26 @@ class DataExporter:
         with h5py.File(buffer, 'w') as f:
             param_grp = f.create_group('parameters')
             for k, v in params.items():
-                if isinstance(v, (int, float, str)):
+                if isinstance(v, (int, float, str, bool)):
                     param_grp.attrs[k] = v
                 elif isinstance(v, np.ndarray):
                     param_grp.create_dataset(k, data=v)
+                else:
+                    # tuples, lists, dicts → JSON string
+                    param_grp.attrs[k] = json.dumps(v, default=str)
             meta_grp = f.create_group('metadata')
             for k, v in sim_data.get('metadata', {}).items():
-                if isinstance(v, (int, float, str)):
+                if isinstance(v, (int, float, str, bool)):
                     meta_grp.attrs[k] = v
                 elif isinstance(v, dict):
                     subgrp = meta_grp.create_group(k)
                     for sk, sv in v.items():
-                        subgrp.attrs[sk] = sv
+                        if isinstance(sv, (int, float, str, bool)):
+                            subgrp.attrs[sk] = sv
+                        else:
+                            subgrp.attrs[sk] = json.dumps(sv, default=str)
+                else:
+                    meta_grp.attrs[k] = json.dumps(v, default=str)
             x = np.linspace(-N * dx / 2, N * dx / 2, N)
             y = np.linspace(-N * dx / 2, N * dx / 2, N)
             f.create_dataset('x', data=x)
@@ -1824,7 +1844,8 @@ class DataExporter:
                 for field in ['phi', 'eta1', 'eta2', 'sigma_eq', 'sigma_h',
                               'h', 'eps_p_mag', 'sigma_y']:
                     if field in frame:
-                        grp.create_dataset(field, data=frame[field])
+                        grp.create_dataset(field, data=frame[field],
+                                           compression='gzip')
         buffer.seek(0)
         return buffer, f"{sim_name}.h5"
 
@@ -1926,10 +1947,10 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.1               ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.2.0             ██████
 # ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors ·     ██████
-# ███  Histograms · Per-parameter sidebar selectors                     ██████
-# ███  PUBLICATION-QUALITY VISUALS DASHBOARD                            ██████
+# ███  DUAL-MODE PROMPTS: strict_extract vs reasoned_inference          ██████
+# ███  Chain-of-Thought reasoning surfaced in UI + scored by LatentMoE  ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -2076,7 +2097,7 @@ class PlasticityOllamaClient:
 
     def __init__(self, url: str = "http://localhost:11434",
                  model: str = "qwen2.5:7b",
-                 timeout: float = 90.0, max_retries: int = 2):
+                 timeout: float = 120.0, max_retries: int = 2):
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -2105,6 +2126,12 @@ class PlasticityOllamaClient:
         return []
 
     def generate_json(self, prompt: str, system: Optional[str] = None) -> Optional[Any]:
+        """Call Ollama with format=json and lenient JSON parsing.
+
+        NOTE: num_predict is raised to 4096 because the reasoned-inference
+        prompt requires a full chain-of-thought per parameter (5 params ×
+        3-5 steps each), which can easily exceed 2048 tokens.
+        """
         if not REQUESTS_AVAILABLE:
             return None
         payload: Dict[str, Any] = {
@@ -2112,7 +2139,7 @@ class PlasticityOllamaClient:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1, "top_p": 0.9, "num_predict": 2048},
+            "options": {"temperature": 0.1, "top_p": 0.9, "num_predict": 4096},
         }
         if system:
             payload["system"] = system
@@ -2123,7 +2150,11 @@ class PlasticityOllamaClient:
                                    json=payload, timeout=self.timeout)
                 r.raise_for_status()
                 raw = r.json().get("response", "")
-                return self._parse_lenient(raw)
+                parsed = self._parse_lenient(raw)
+                # Debug is now at DEBUG level only — no hot-loop print.
+                logger.debug("Ollama raw response (first 400 chars): %s",
+                             (raw or "")[:400])
+                return parsed
             except Exception as e:
                 logger.warning("Ollama attempt %d failed: %s", attempt + 1, e)
                 if attempt == self.max_retries:
@@ -2135,9 +2166,11 @@ class PlasticityOllamaClient:
     def _parse_lenient(raw: str) -> Any:
         if raw is None:
             return None
-        s = raw.strip()
+        s = raw.strip().lstrip()          # tolerate leading whitespace/newlines
+        # strip markdown code fences (leading or trailing)
         s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
+        s = re.sub(r"\s*```\s*$", "", s)
+        s = s.strip()
         for oc, cc in (("[", "]"), ("{", "}")):
             i, j = s.find(oc), s.rfind(cc)
             if i != -1 and j > i:
@@ -2157,7 +2190,7 @@ class PlasticityOllamaClient:
 class PlasticityCorpus:
     """Loads, chunks, and caches text records from the 5 metadatabases."""
 
-    _CACHE_VERSION = "v8"
+    _CACHE_VERSION = "v82"
 
     def __init__(self, db_dir: str = "json_metadatabase", max_chars: int = 4000):
         self.db_dir = db_dir
@@ -2412,99 +2445,168 @@ class PlasticityFAISSRetriever:
 
 
 # ----------------------------------------------------------------------------
-# LLM + HEURISTIC EXTRACTION
+# LLM PROMPTS: TWO MODES
 # ----------------------------------------------------------------------------
+# Mode A — strict_extract  (used by prior learning)
+#   Extract ONLY explicit numerical values. No inference. No filler.
+# Mode B — reasoned_inference  (used by runtime recommendation)
+#   Return ALL FIVE parameters per document, with a Chain-of-Thought
+#   reasoning field for anything that had to be inferred.
+# ----------------------------------------------------------------------------
+
 _EXTRACT_SCHEMA = (
     '{"param": "rho0|mu|gamma0_dot|srs|sigma0", '
-    '"value": <number>, "unit": "<string>", '
-    '"material": "<string>", "temp": <number in K or null>, '
+    '"value": <number>, '
+    '"unit": "<string>", '
+    '"material": "<string>", '
+    '"temp": <number in K or null>, '
     '"strain_rate": <number in s^-1 or null>, '
-    '"method": "<experiment|MD|DFT|review|unknown>", '
+    '"method": "explicit|LLM_inferred", '
     '"confidence": <0.0-1.0>, '
-    '"evidence": "<short quoted snippet>"}'
+    '"evidence": "<short quoted snippet or empty>", '
+    '"reasoning": "<3-5 step chain-of-thought, or empty for explicit>"}'
 )
-#
-# ==================================================================================
-#THIS PROMPT RESTRICTS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING, AND IS COMMENTED OUT
-# ====================================================================================
-#_EXTRACT_PROMPT = """You are a strict materials-science NER system.
-#Extract ONLY the following five plasticity parameters from the text:
-#  1. rho0        - initial dislocation density              [m^-2]
-#  2. mu          - shear modulus                            [Pa or GPa]
-#  3. gamma0_dot  - reference strain rate                    [s^-1]
-#  4. srs         - strain-rate sensitivity exponent (m)     [dimensionless]
-#  5. sigma0      - friction / initial yield stress          [Pa or MPa]
-#Target context (do NOT invent values for it):
-#  Material       = "{material}"
-#  Temperature    = "{temp_k}" K
-#  Strain rate    = "{strain_rate}" s^-1
-#Return ONLY a JSON ARRAY of objects. Each object must match this schema:
-#  {schema}
-#If a parameter is not present, omit it. If a field is unknown, use null.
-#Do NOT include markdown, comments, or explanations.
-#TEXT:
-#\"\"\"{text}\"\"\"
-#"""
-# ==================================================================================
-#THIS PROMPT ALLOWS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING FOR GAMMA0_DOT ONLY
-# ====================================================================================
-#_EXTRACT_PROMPT = """You are an expert materials-science AI system.
-#Extract the following five plasticity parameters from the text:
-# 1. rho0        - initial dislocation density              [m^-2]
-# 2. mu          - shear modulus                            [Pa or GPa]
-#  3. gamma0_dot  - reference strain rate                    [s^-1]
-#  4. srs         - strain-rate sensitivity exponent (m)     [dimensionless]
-#  5. sigma0      - friction / initial yield stress          [Pa or MPa]
-#Target context:
-#  Material       = "{material}"
-#  Temperature    = "{temp_k}" K
-#  Strain rate    = "{strain_rate}" s^-1
-#Rules for extraction:
-#1. If a parameter is explicitly stated in the text, extract it exactly and set confidence > 0.8.
-#2. If 'gamma0_dot' (reference strain rate) is NOT explicitly stated in the text, INFER a value of 0.001 s^-1 (which is the standard quasi-static rate for this solver). Set method to "LLM_inferred" and confidence to 0.4.
-#3. For rho0, mu, srs, and sigma0: Do NOT infer values if they are missing. Omit them instead.
-#Return ONLY a JSON ARRAY of objects. Each object must match this schema:
-#  {schema}
-#Do NOT include markdown, comments, or explanations.
-#TEXT:
-#\"\"\"{text}\"\"\"
-#"""
-# ==================================================================================
-#THIS PROMPT ALLOWS THE LLM TO PROVIDE A GENERATED VALUE BASED UPON REASONING FOR ALL PARAMS IF NOT FOUND IN JSON FILE
-# ====================================================================================
-_EXTRACT_PROMPT = """You are an expert materials-science AI system.
-Extract the following five plasticity parameters from the text:
-  1. rho0        - initial dislocation density              [m^-2]
-  2. mu          - shear modulus                            [Pa or GPa]
-  3. gamma0_dot  - reference strain rate                    [s^-1]
-  4. srs         - strain-rate sensitivity exponent (m)     [dimensionless]
-  5. sigma0      - friction / initial yield stress          [Pa or MPa]
 
-Target context:
-  Material       = "{material}"
-  Temperature    = "{temp_k}" K
-  Strain rate    = "{strain_rate}" s^-1
+_REASONED_INFERENCE_SCHEMA = _EXTRACT_SCHEMA  # same shape, documented separately
 
-Rules for extraction:
-1. If a parameter is explicitly stated in the text, extract it exactly and set confidence > 0.8.
-2. If ANY of the five parameters are NOT explicitly stated, use your materials science knowledge to INFER a statistically reasonable value for the target material ({material}). Set method to "LLM_inferred" and confidence to 0.4.
-3. When inferring values, treat the baseline textbook values as the statistical MEAN. Adjust your inferred value around this mean based on the physical context, temperature, or processing history mentioned in the text:
-   - gamma0_dot: Mean is 1e-3 s^-1. Vary between 5e-4 and 2e-3 depending on context.
-   - rho0: Mean is 1e12 m^-2. If the text implies heavy deformation or high temperature, infer higher (e.g., 3e12 to 1e13). If well-annealed, infer lower (e.g., 5e11).
-   - srs: Mean is 20.0. Vary between 15.0 and 30.0 depending on the implied rate sensitivity of the alloy.
-   - mu: Mean is 48 GPa (Cu), 26 GPa (Al), or 80 GPa (Ni). Vary by ±2 GPa based on the target temperature.
-   - sigma0: Mean is 50 MPa (Cu), 30 MPa (Al), or 70 MPa (Ni). Vary by ±15 MPa based on solid solution or precipitation strengthening implied in the text.
+_STRICT_EXTRACT_PROMPT = """You are a strict materials-science NER system.
+Extract ONLY plasticity parameters that are explicitly and unambiguously
+stated as numerical values in the text. Do NOT infer. Do NOT fill in
+missing parameters.
 
-Return ONLY a JSON ARRAY of objects. Each object must match this schema:
+Parameters of interest:
+  - rho0        (initial dislocation density, m^-2)
+  - mu          (shear modulus, Pa or GPa)
+  - gamma0_dot  (reference strain rate, s^-1)
+  - srs         (strain-rate sensitivity exponent m, dimensionless)
+  - sigma0      (friction / initial yield stress, Pa or MPa)
+
+For each parameter you find, report the value verbatim (preserve the unit
+as written), identify the material mentioned in the text, and quote the
+exact sentence as evidence. Set method="explicit" and confidence >= 0.8.
+Leave the reasoning field as an empty string.
+
+If a parameter is missing, qualitative, or only mentioned without a number,
+OMIT it from the output entirely.
+
+Schema per element:
   {schema}
-Do NOT include markdown, comments, or explanations.
+
+Return ONLY a JSON ARRAY. No markdown, no prose.
+
+TEXT:
+\"\"\"{text}\"\"\"
+"""
+
+_REASONED_INFERENCE_PROMPT = """You are an expert materials-science AI.
+
+GOAL: For the target material "{material}" at T={temp_k} K and strain rate
+{strain_rate} s^-1, return ALL FIVE of these plasticity parameters:
+  1. rho0        (initial dislocation density, m^-2)
+  2. mu          (shear modulus, Pa)
+  3. gamma0_dot  (reference strain rate, s^-1)
+  4. srs         (strain-rate sensitivity exponent m, dimensionless)
+  5. sigma0      (friction / initial yield stress, Pa)
+
+For EACH parameter, choose ONE of two paths:
+
+PATH A — EXPLICIT EXTRACTION
+  If the text states the parameter as a number with a unit, copy it
+  verbatim. Set method="explicit", confidence=0.9, evidence=<exact
+  sentence>, reasoning="" (empty string).
+
+PATH B — REASONED INFERENCE (only if Path A does not apply)
+  Derive the value using the physics-based reasoning chain below. Write
+  the chain in the `reasoning` field as 3-5 short numbered steps. Set
+  method="LLM_inferred" and confidence between 0.4 and 0.6 depending on
+  how clearly the text supports the chain.
+
+REASONING CHAINS (use these formulas, do NOT just look up a constant):
+
+  mu(T, material):
+    Step 1: Identify material from text or from target "{material}".
+            If target is "?", identify from text. If unclear, use Cu as default.
+    Step 2: Pick room-T baseline:
+            Cu: 48 GPa, Al: 26 GPa, Ni: 80 GPa, Fe: 80 GPa, Ti: 44 GPa,
+            Mg: 17 GPa, Cr: 115 GPa (bcc), Co: 75 GPa, Au: 27 GPa, Ag: 30 GPa,
+            CoCrFeNi (HEA): 80 GPa.
+    Step 3: If T != 300 K, apply: mu(T) = mu_300 * (1 - 5e-4 * (T - 300)).
+    Step 4: If text mentions alloying, cold work, or irradiation hardening,
+            adjust ±2 GPa (state direction in reasoning).
+    Step 5: Output value in Pa.
+
+  sigma0(T, material, processing):
+    Step 1: Identify material and processing from text.
+    Step 2: Pick baseline:
+            Cu: 50 MPa, Al: 30 MPa, Ni: 70 MPa, Fe: 150 MPa, Ti: 200 MPa,
+            Mg: 80 MPa, Au: 10 MPa, Ag: 20 MPa, CoCrFeNi: 300 MPa.
+    Step 3: If text mentions solid-solution strengthening, add 10-50 MPa.
+            If precipitation strengthening, add 100-500 MPa.
+            If heavy cold work, add 50-200 MPa.
+            If annealed, subtract 20-50 MPa.
+    Step 4: If T > 400 K, scale by (1 - 3e-4*(T-300)) for thermal softening.
+    Step 5: Output value in Pa.
+
+  rho0(T, material, processing):
+    Step 1: Identify material and processing.
+    Step 2: Pick baseline annealed density:
+            Cu/Al/Ni (annealed FCC): 1e12 m^-2
+            Fe (annealed BCC):       1e13 m^-2
+            HEA / heavily alloyed:   1e13 m^-2
+    Step 3: If text mentions cold rolling / ECAP / HPT / shock loading,
+            multiply by 10-100 (e.g., 1e14 to 1e15).
+    Step 4: If text mentions annealing, recovery, or recrystallization,
+            divide by 10 (e.g., 1e11).
+    Step 5: If T > 600 K, account for thermal recovery:
+            rho(T) = rho_0 * exp(-D(T)*t); for short times, divide by 2.
+    Step 6: Output value in m^-2.
+
+  gamma0_dot(T, strain_rate, material):
+    Step 1: If the user-provided strain rate ({strain_rate} s^-1) is given,
+            use that as gamma0_dot (it IS the reference rate).
+    Step 2: Otherwise, baseline is 1e-3 s^-1 (quasi-static).
+    Step 3: If text mentions dynamic loading / shock, set to 1e3-1e6.
+    Step 4: If text mentions creep / very low rate, set to 1e-8-1e-6.
+    Step 5: Output value in s^-1.
+
+  srs(m, material, T):
+    Step 1: Identify material class.
+    Step 2: Pick baseline:
+            FCC metals (Cu, Al, Ni, Au, Ag): m = 20 (or n = 1/m = 0.05)
+            BCC metals (Fe, W, Mo, Cr):      m = 100 (n = 0.01)
+            HCP metals (Mg, Ti, Zn, Zr):     m = 50  (n = 0.02)
+            HEA / MPEA:                       m = 30
+    Step 3: If T > 0.5 T_m, m decreases (rate sensitivity rises).
+    Step 4: If text mentions superplasticity, m → 1 (set to 200).
+    Step 5: Output dimensionless value.
+
+CRITICAL RULES:
+- Return ALL FIVE parameters for every document.
+- For Path A, evidence MUST be a verbatim sentence from the text.
+- For Path B, the reasoning field MUST contain 3-5 numbered steps
+  citing the formula used.
+- If the text contains NO information at all (blank/garbage), still
+  return Path B for all 5 parameters with the simplest possible chain
+  (just Steps 1 and 2) and confidence=0.3.
+
+Return ONLY a JSON ARRAY. Schema per element:
+  {schema}
+No markdown, no comments, no prose outside JSON.
 
 TEXT:
 \"\"\"{text}\"\"\"
 """
 
 
+# ----------------------------------------------------------------------------
+# LLM + HEURISTIC EXTRACTION (DUAL-MODE)
+# ----------------------------------------------------------------------------
 class PlasticityParameterExtractor:
+    """Extracts plasticity parameters from text, in one of two modes:
+
+        mode="strict_extract"      → ONLY explicit values (for priors)
+        mode="reasoned_inference"  → fill gaps via Chain-of-Thought (runtime)
+    """
 
     NUM_RE = re.compile(
         r"(-?\d+(?:\.\d+)?)\s*(?:[×xX\*]\s*10\s*\^?\s*\{?(-?\d+)\}?)?\s*"
@@ -2518,30 +2620,47 @@ class PlasticityParameterExtractor:
         self.cache = cache if cache is not None else {}
 
     def extract(self, text: str, material: str, temp_k: float,
-                strain_rate: float, use_llm: bool = True) -> List[Dict[str, Any]]:
-        key = _pl_hash(f"{text[:2000]}|{material}|{temp_k}|{strain_rate}|{use_llm}")
+                strain_rate: float, use_llm: bool = True,
+                mode: str = "reasoned_inference") -> List[Dict[str, Any]]:
+        """Extract plasticity parameters from `text`.
+
+        Parameters
+        ----------
+        mode : {"strict_extract", "reasoned_inference"}
+            · "strict_extract"      — no inference, explicit values only.
+                                      Used by the prior learner.
+            · "reasoned_inference"  — returns all 5 parameters per doc,
+                                      using Chain-of-Thought for gaps.
+                                      Used by the runtime recommender.
+        """
+        key = _pl_hash(
+            f"{text[:2000]}|{material}|{temp_k}|{strain_rate}|{use_llm}|{mode}"
+        )
         if key in self.cache:
             return self.cache[key]
 
         out: List[Dict[str, Any]] = []
         if use_llm and self.client is not None:
-            prompt = _EXTRACT_PROMPT.format(
-                material=material, temp_k=temp_k, strain_rate=strain_rate,
-                schema=_EXTRACT_SCHEMA, text=text[:3500],
-            )
+            if mode == "strict_extract":
+                prompt = _STRICT_EXTRACT_PROMPT.format(
+                    schema=_EXTRACT_SCHEMA, text=text[:3500])
+            else:  # reasoned_inference
+                prompt = _REASONED_INFERENCE_PROMPT.format(
+                    schema=_REASONED_INFERENCE_SCHEMA,
+                    material=material, temp_k=temp_k, strain_rate=strain_rate,
+                    text=text[:3500])
             raw = self.client.generate_json(prompt)
-
-            # ===== FIX #2 =====
-            # Debug: print raw Ollama JSON so the terminal lets you verify
-            # whether the LLM is returning a valid JSON array with the
-            # inferred statistical means (instead of silently falling back
-            # to the regex heuristic extractor below).
-            print(f"\n--- OLLAMA RAW RESPONSE ---\n{raw}\n---------------------------")
-            # ==================
-
+            # Debug is at DEBUG level; no hot-loop print.
+            logger.debug("Ollama raw (%s): %s", mode, raw)
             out = self._validate(raw)
+
+        # Heuristic fallback: extract only explicit numbers near aliases.
+        # Runs whenever the LLM returned nothing (either disabled or failed).
+        # In strict mode this is still "strict" — regex only picks up numbers
+        # that already appear in the text.
         if not out:
             out = self._heuristic(text, material, temp_k, strain_rate)
+
         self.cache[key] = out
         return out
 
@@ -2574,6 +2693,7 @@ class PlasticityParameterExtractor:
                 "method": str(item.get("method") or "unknown").lower(),
                 "confidence": float(item.get("confidence", 0.5) or 0.5),
                 "evidence": str(item.get("evidence") or "")[:240],
+                "reasoning": str(item.get("reasoning") or "")[:600],
             })
         return out
 
@@ -2608,6 +2728,7 @@ class PlasticityParameterExtractor:
                     "method": "heuristic",
                     "confidence": 0.35,
                     "evidence": window[:180].strip(),
+                    "reasoning": "",
                 })
                 break
         return out
@@ -2631,6 +2752,7 @@ class PlasticityCandidate:
     source_file: str
     source_title: str
     evidence: str
+    reasoning: str = ""           # ← NEW: chain-of-thought from the LLM
     clamped: bool = False
 
     def to_display(self) -> Dict[str, Any]:
@@ -2646,19 +2768,29 @@ class PlasticityCandidate:
             "source": f"{self.source_file} — {self.source_title[:60]}",
             "clamped": self.clamped,
             "evidence": self.evidence[:140],
+            "reasoning": (self.reasoning[:200] + "…"
+                          if len(self.reasoning) > 200 else self.reasoning),
         }
 
 
 class PlasticityLatentMoEScorer:
+    """Six-expert gating: material, thermal, strain, method, confidence,
+    and (NEW) reasoning quality."""
 
-    def __init__(self, w_material: float = 0.45, w_thermal: float = 0.25,
-                 w_strain: float = 0.10, w_method: float = 0.10,
-                 w_confidence: float = 0.10, thermal_sigma: float = 100.0):
+    def __init__(self,
+                 w_material: float = 0.40,
+                 w_thermal: float = 0.20,
+                 w_strain: float = 0.08,
+                 w_method: float = 0.08,
+                 w_confidence: float = 0.04,
+                 w_reasoning: float = 0.20,
+                 thermal_sigma: float = 100.0):
         self.w_material = w_material
         self.w_thermal = w_thermal
         self.w_strain = w_strain
         self.w_method = w_method
         self.w_confidence = w_confidence
+        self.w_reasoning = w_reasoning
         self.thermal_sigma = thermal_sigma
 
     def _material_expert(self, ext_mat: str, target_mat: str) -> float:
@@ -2706,7 +2838,33 @@ class PlasticityLatentMoEScorer:
             "md": 0.6, "molecular dynamics": 0.6,
             "dft": 0.5, "first-principles": 0.5, "ab initio": 0.5,
             "heuristic": 0.3,
+            "explicit": 0.9, "llm_inferred": 0.5,
         }.get((method or "").lower(), 0.5)
+
+    @staticmethod
+    def _reasoning_expert(reasoning: str, method: str) -> float:
+        """NEW expert: does the LLM's inference have a well-formed CoT?
+
+        · explicit extraction → neutral (0.5)
+        · inferred with no reasoning → 0.2 (distrust)
+        · inferred with N steps → 0.4 + 0.05·N, capped at 0.8
+        · +0.15 bonus if the chain cites a formula
+        """
+        method_l = (method or "").lower()
+        if method_l not in ("llm_inferred", "heuristic"):
+            return 0.5  # neutral for explicit extractions
+        if not reasoning:
+            return 0.2  # inferred with no explanation → low trust
+        # Count reasoning steps: "Step 1", "Step 2", ..., or newline-separated
+        n_steps = reasoning.count("Step ") + reasoning.count("\n")
+        # Look for formula-citation markers
+        cites_formula = any(k in reasoning for k in
+                            ["mu(T)", "sigma0", "rho_0", "gamma0_dot",
+                             "*", "/", "exp", "log", "GPa", "MPa"])
+        base = min(0.4 + 0.05 * n_steps, 0.8)
+        if cites_formula:
+            base = min(base + 0.15, 0.85)
+        return float(base)
 
     def score(self, extractions, target_material, target_temp,
               target_strain_rate=1e-3, top_k=8):
@@ -2727,12 +2885,15 @@ class PlasticityLatentMoEScorer:
             s_strain = self._strain_expert(ext.get("strain_rate"), target_strain_rate)
             s_method = self._method_expert(ext.get("method", "unknown"))
             s_conf = float(ext.get("confidence", 0.5) or 0.5)
+            s_reason = self._reasoning_expert(ext.get("reasoning", ""),
+                                              ext.get("method", "unknown"))
 
             score = (self.w_material * s_mat
                      + self.w_thermal * s_temp
                      + self.w_strain * s_strain
                      + self.w_method * s_method
-                     + self.w_confidence * s_conf)
+                     + self.w_confidence * s_conf
+                     + self.w_reasoning * s_reason)
 
             buckets[p].append(PlasticityCandidate(
                 param=p, value_si=v_si_clamped,
@@ -2746,6 +2907,7 @@ class PlasticityLatentMoEScorer:
                 source_file=str(ext.get("_source_file", "")),
                 source_title=str(ext.get("_source_title", "")),
                 evidence=str(ext.get("evidence", "")),
+                reasoning=str(ext.get("reasoning", "")),
                 clamped=was_clamped,
             ))
 
@@ -2759,17 +2921,29 @@ class PlasticityLatentMoEScorer:
 # LEARNED PER-MATERIAL PRIORS
 # ----------------------------------------------------------------------------
 class PlasticityMaterialPriorLearner:
+    """Learns per-material priors from explicit corpus extractions.
+
+    IMPORTANT: always uses `mode="strict_extract"` — no LLM inference is
+    allowed in the prior-learning path, otherwise the "priors" become
+    echoes of the LLM's own prompt baselines rather than real statistics.
+    """
 
     def __init__(self, extractor: PlasticityParameterExtractor):
         self.extractor = extractor
 
-    def learn(self, corpus, use_llm=False, max_docs=200) -> pd.DataFrame:
+    def learn(self, corpus, material: str = "?", temp_k: float = 300.0,
+              strain_rate: float = 1e-3, use_llm: bool = False,
+              max_docs: int = 200) -> pd.DataFrame:
         raw: Dict[Tuple[str, str], List[float]] = {}
         for doc in corpus[:max_docs]:
             text = doc["text"]
             extractions = self.extractor.extract(
-                text, material="?", temp_k=300, strain_rate=1e-3,
+                text,
+                material=material,          # real target (was "?")
+                temp_k=temp_k,
+                strain_rate=strain_rate,
                 use_llm=use_llm,
+                mode="strict_extract",      # never infer during learning
             )
             for ext in extractions:
                 mat = (ext.get("material") or "").strip() or "unknown"
@@ -2825,9 +2999,6 @@ def render_plasticity_candidate_histograms(
     candidates_by_param: Dict[str, List[PlasticityCandidate]],
     log_scale_params: Optional[set] = None,
 ) -> None:
-    from plotly.subplots import make_subplots
-    import plotly.graph_objects as go
-
     log_scale_params = log_scale_params or {"rho0", "gamma0_dot"}
 
     available = [p for p in PARAM_ORDER if candidates_by_param.get(p)]
@@ -2920,7 +3091,13 @@ class PlasticityRecommendationBundle:
 
 
 class PlasticityRecommender:
-    """End-to-end: FAISS retrieve → LLM extract → LatentMoE rank → priors."""
+    """End-to-end: FAISS retrieve → LLM extract → LatentMoE rank → priors.
+
+    v8.2.0 changes:
+      · Runtime extraction uses `mode="reasoned_inference"` (Chain-of-Thought)
+      · Prior learning uses `mode="strict_extract"` (explicit values only)
+      · Prior learner receives the *real* target material/T/strain_rate
+    """
 
     CACHE_DIR = ".plasticity_cache"
     LLM_CACHE_FILE = "llm_cache.json"
@@ -2996,9 +3173,11 @@ class PlasticityRecommender:
         for i, doc in enumerate(docs):
             if progress_callback:
                 progress_callback(i + 1, len(docs), doc.get("title", "")[:60])
+            # RUNTIME PATH → reasoned_inference (fills missing params with CoT)
             ext = self.extractor.extract(
                 doc["text"], material, temp_k, strain_rate,
                 use_llm=self.llm_available,
+                mode="reasoned_inference",
             )
             for e in ext:
                 e["_source_file"] = doc["source"]
@@ -3012,16 +3191,15 @@ class PlasticityRecommender:
         priors_df = pd.DataFrame()
         if build_priors:
             try:
-                # ===== FIX #1 =====
-                # Use the LLM for the prior learner as well, so that the
-                # "Learned Priors" table + radar chart reflect the same
-                # statistical inference the LLM applies to the retrieved
-                # documents (previously this was hard-coded to use_llm=False,
-                # which silently fell back to the regex heuristic extractor).
+                # PRIOR PATH → strict_extract (explicit values only, no echo)
                 priors_df = self.prior_learner.learn(
-                    corpus, use_llm=True, max_docs=min(150, len(corpus)),
+                    corpus,
+                    material=material,           # real target (was "?")
+                    temp_k=temp_k,
+                    strain_rate=strain_rate,
+                    use_llm=self.llm_available,
+                    max_docs=min(150, len(corpus)),
                 )
-                # ==================
             except Exception as e:
                 logger.warning("Prior learning failed: %s", e)
 
@@ -3193,6 +3371,8 @@ def _plr_reset():
         st.session_state.pop(f"{_PLR}{p}_value_si", None)
     st.session_state.pop(f"{_PLR}bundle", None)
     st.session_state.pop("plasticity_overrides", None)
+    # ALSO drop the live recommender so its in-memory caches go away.
+    st.session_state.pop("_plr_live_recommender", None)
 
 
 def _plr_render_parameter_selector(param: str,
@@ -3271,6 +3451,10 @@ def _plr_render_parameter_selector(param: str,
             st.markdown("**📚 Evidence snippet**")
             with st.container():
                 st.code(chosen.evidence, language="text")
+        # ---- NEW: surface the LLM's reasoning chain ----
+        if chosen.reasoning:
+            with st.expander("🧠 LLM reasoning chain", expanded=False):
+                st.markdown(chosen.reasoning)
 
     st.session_state[f"{_PLR}{param}_value_si"] = value_si
     st.markdown("---")
@@ -3283,10 +3467,11 @@ def render_plasticity_recommender_sidebar(
     ollama_model: str = "qwen2.5:7b",
 ):
     """Sidebar with retrieval + LatentMoE + priors + histograms."""
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.1")
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.2.0")
     st.caption(
         "FAISS + SentenceTransformer retrieval · Ollama NER · LatentMoE scoring · "
-        "learned per‑material priors · candidate histograms · publication visuals."
+        "dual-mode prompts (strict priors vs reasoned inference) · "
+        "Chain-of-Thought surfaced in UI · publication visuals."
     )
 
     col1, col2 = st.columns(2)
@@ -3375,7 +3560,6 @@ def render_plasticity_recommender_sidebar(
     if refresh_btn:
         try:
             purged_items = purge_plasticity_caches()
-            # Also drop any live-recommender reference so a fresh one is built.
             st.session_state.pop("_plr_live_recommender", None)
         except Exception as e:
             st.warning(f"Could not clear all caches: {e}")
@@ -3458,10 +3642,10 @@ def render_plasticity_recommender_sidebar(
         st.markdown("**📚 Learned per‑material priors (from corpus)**")
         with st.container():
             st.caption(
-                "Aggregated from all LLM (or heuristic, if LLM disabled) "
-                "extractions in the corpus. Use this to sanity‑check values "
-                "for materials not directly represented in the retrieved "
-                "documents."
+                "Aggregated from **strict explicit extractions only** in the "
+                "corpus. The LLM is NOT allowed to infer during prior "
+                "learning — so these statistics reflect what the literature "
+                "actually reports, not what the LLM guesses."
             )
             styled = bundle.priors_df.copy()
             for col in ["mean", "median", "std", "p10", "p90"]:
@@ -3803,7 +3987,7 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
     scores = [c.score for c in cands]
     x = np.arange(len(labels))
     cmap = style.get_cmap()
-    colors = [cmap(float(s)) for s in scores]
+    colors = [cmap(float(np.clip(s, 0, 1))) for s in scores]
 
     bars = ax.bar(x, scores, color=colors,
                   edgecolor=style.spine_color,
@@ -3963,7 +4147,7 @@ def render_recommender_treemap_pub(bundle: PlasticityRecommendationBundle,
                           f"<br>score={c.score:.2f}")
             parents.append(p)
             values.append(max(c.score, 0.01))
-            rgba = cmap(float(c.score))
+            rgba = cmap(float(np.clip(c.score, 0, 1)))
             colors.append(
                 f'rgb({int(rgba[0]*255)},{int(rgba[1]*255)},{int(rgba[2]*255)})'
             )
@@ -4050,10 +4234,17 @@ def render_recommender_histograms_pub(
             alpha=0.75,
         )
 
+        # Colour bars by normalized position within the histogram range,
+        # not by edge/max (which makes the last bin always full-intensity).
+        vmin, vmax = (np.log10(max(edges[0], 1e-10)),
+                      np.log10(max(edges[-1], 1e-10))) if use_log else \
+                     (edges[0], edges[-1])
         for patch, edge in zip(patches, edges[:-1]):
-            norm_val = edge / max(edges) if not use_log else \
-                (np.log10(max(edge, 1e-10)) - np.log10(max(edges[0], 1e-10))) / \
-                max(np.log10(max(edges[-1], 1e-10)) - np.log10(max(edges[0], 1e-10)), 1e-9)
+            if use_log:
+                e = np.log10(max(edge, 1e-10))
+                norm_val = (e - vmin) / max(vmax - vmin, 1e-9)
+            else:
+                norm_val = (edge - vmin) / max(vmax - vmin, 1e-9)
             patch.set_facecolor(cmap(np.clip(norm_val, 0, 1)))
 
         best = bundle.best(p)
@@ -4361,7 +4552,7 @@ def render_recommender_visuals_dashboard():
         ["Radar Chart", "Bar Chart", "Sankey Diagram", "Treemap",
          "Histograms (publication)"],
         index=0,
-        key="rec_chart_type_v81",
+        key="rec_chart_type_v82",
     )
 
     col_style, col_chart = st.columns([1, 2])
@@ -4437,6 +4628,7 @@ def render_recommender_visuals_dashboard():
                     'Prior': _pl_fmt(p, prior) if prior is not None else '—',
                     'AI Best': _pl_fmt(p, best.value_si) if best else '—',
                     'Score': f"{best.score:.3f}" if best else '—',
+                    'Method': best.method if best else '—',
                     'Source': (best.source_file[:30] + '…')
                               if best and best.source_file else '—',
                 })
@@ -4472,13 +4664,13 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.1.2:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.2.0:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
-    • <span style="color: green;">🤖 AI RECOMMENDER:</span> FAISS + Ollama + LatentMoE + LLM-driven learned priors.<br>
+    • <span style="color: green;">🤖 REASONING RECOMMENDER:</span> FAISS + Ollama + LatentMoE + dual-mode prompts (strict priors vs CoT inference).<br>
+    • <span style="color: green;">🧠 CHAIN-OF-THOUGHT:</span> every inferred parameter carries an auditable reasoning chain.<br>
     • <span style="color: green;">📊 PUBLICATION VISUALS:</span> Radar / Bars / Sankey / Treemap + full styling.<br>
-    • <span style="color: green;">🗑️ FULL CACHE PURGE:</span> "Force reload corpus" now also wipes the LLM cache.<br>
-    • <span style="color: green;">🐛 DEBUG:</span> Ollama raw JSON response printed to terminal for verification.<br>
+    • <span style="color: green;">🗑️ FULL CACHE PURGE:</span> "Force reload corpus" wipes session + FAISS + LLM caches.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -4487,9 +4679,15 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear All", type="secondary"):
-                if 'twin_simulations' in st.session_state:
-                    del st.session_state.twin_simulations
-                st.success("All simulations cleared!")
+                # Clear EVERY session key the app owns.
+                for k in list(st.session_state.keys()):
+                    if k in ('twin_simulations', 'initial_geometry', 'initialized',
+                             'results_history', 'timesteps', 'solver',
+                             'selected_sim_id', 'comparison_config',
+                             'sweep_results', 'sweep_param',
+                             'plasticity_overrides'):
+                        st.session_state.pop(k, None)
+                st.success("All simulations & state cleared!")
                 st.rerun()
         with col2:
             if st.button("🔄 Refresh", type="secondary"):
@@ -4513,7 +4711,7 @@ def main():
         st.markdown("---")
 
         # ▼▼▼ AI Plasticity Recommender sidebar ▼▼▼
-        with st.expander("🧠 AI Plasticity Recommender v8.1", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.2.0", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
@@ -5192,7 +5390,7 @@ def main():
                     st.pyplot(fig)
                     plt.close(fig)
                 st.subheader("Convergence Monitoring")
-                if hasattr(st.session_state, 'solver') and \
+                if 'solver' in st.session_state and \
                    st.session_state.solver.history['phi_norm']:
                     full_timesteps = (np.arange(len(st.session_state.solver.history['phi_norm']))
                                       * params['dt'])
