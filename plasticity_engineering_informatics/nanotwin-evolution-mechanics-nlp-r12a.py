@@ -17,6 +17,13 @@
 # ███   · Offset-point value labels + white halo + y headroom           ███
 # ███   · Mathtext scientific notation; unit stated once in axis label  ███
 # ███   · Provenance (LLM/heuristic) encoded as marker shape + legend   ███
+# ███ FIX (v8.5.1): MATHTEXT ESCAPING HARDENING                       ████
+# ███   · PARAM_META symbols were r'\\rho_0' (raw + doubled backslashes) ███
+# ███     → two literal backslashes → mathtext ParseException at draw   ███
+# ███     time. Corrected to r'\rho_0' (raw + single backslash).        ███
+# ███   · Added normalize_tex / strip_tex / safe_mathtext guards so the  ███
+# ███     dashboard degrades gracefully instead of crashing on any      ███
+# ███     malformed TeX fragment reaching a Matplotlib text artist.     ███
 # ============================================================================
 
 import numpy as np
@@ -29,6 +36,8 @@ from matplotlib.ticker import (AutoMinorLocator, MultipleLocator, FormatStrForma
                                FuncFormatter, NullLocator)  # v8.5.0: sci_tex tick formatting
 from matplotlib.lines import Line2D    # v8.5.0: proxy-artist legends (provenance markers)
 from matplotlib.patches import Patch    # v8.5.0: proxy-artist legends (best-match patch)
+from matplotlib.mathtext import MathTextParser   # v8.5.1: pre-flight mathtext validation
+from matplotlib.font_manager import FontProperties  # v8.5.1: ditto
 import matplotlib.animation as animation
 from PIL import Image
 import plotly.graph_objects as go
@@ -607,23 +616,22 @@ class PublicationEnhancer:
 
 
 # ============================================================================
-# LATENTMoE CANDIDATE-SCORE BAR CHART — PUBLICATION QUALITY (v8.5.0)
+# LATENTMoE CANDIDATE-SCORE BAR CHART — PUBLICATION QUALITY (v8.5.0/8.5.1)
 # ============================================================================
-# Drop-in fixes for the candidate-score figure ("Fixing the LatentMoE
-# Candidate-Score Figure"):
-#   1. Labels collide with bar tops / box lines
-#      -> annotations in offset POINTS (xytext=(0, 9), textcoords=
-#         'offset points') + white halo bbox + y headroom (max*1.22) +
-#         savefig(pad_inches=0.05-0.1)
-#   2. "1.00e+13 m^-2" default tick formatter is ugly
-#      -> custom mathtext via sci_tex(): "$1.0\times10^{13}$", with the unit
-#         stated ONCE in the axis label: "($\mathrm{m^{-2}}$)"
-#   3. LLM vs heuristic provenance invisible
-#      -> provenance encoded as marker SHAPE (D = LLM, ^ = heuristic) at each
-#         bar top + legend built from PROXY ARTISTS, placed ABOVE the axes so
-#         it can never collide with bars/labels
-#      (dual-channel encoding: colour = selection, shape = provenance
-#       -> greyscale-safe AND colour-blind safe)
+# v8.5.1 mathtext-escaping hardening (this is the fix for the reported
+# "Initial dislocation density $\\rho_0$ ($\mathrm{m^{-2}}$)" ParseException):
+#
+# The previous PARAM_META used r'\\rho_0' — a RAW string whose content is
+# literally two backslash characters. Matplotlib's mathtext grammar has no
+# command for the sequence \\, so the grammar bailed out mid-expression and
+# backtracked to the first unmatched '$' at char 28 (the opening dollar of
+# the very next math segment). The error message therefore pointed at the
+# wrong place; the true corruption was the doubled backslash inside \rho.
+#
+# The corrected PARAM_META below uses r'\rho_0' (RAW string → one literal
+# backslash). normalize_tex() additionally repairs any residual r'\\\\'
+# transcription errors, and safe_mathtext() degrades gracefully to plain
+# text instead of crashing the whole Streamlit dashboard.
 # ============================================================================
 
 # ---- provenance -> marker SHAPE (independent of colour => colour-blind safe)
@@ -658,16 +666,77 @@ def sci_tex(value, unit=None, decimals=1):
 
 
 # ---- per-parameter symbol/unit metadata (reusable for every recommender plot)
+# v8.5.1: EVERY symbol is a RAW string with SINGLE backslashes.
+#   r'\rho_0'            ✅  one literal backslash + command name
+#   '\\rho_0'            ✅  (equally fine: non-raw with escaped backslash)
+#   r'\\rho_0'           ❌  TWO literal backslashes → mathtext ParseException
+#   '\rho_0'             ❌  \r = carriage return → silent string corruption
 PARAM_META = {
-    'rho0':           dict(title='Initial dislocation density',      symbol=r'\\rho_0',              unit='m^{-2}'),
-    'mu':             dict(title='Shear modulus',                    symbol=r'\\mu',                 unit='GPa'),
-    'gamma0_dot':     dict(title='Reference shear strain rate',      symbol=r'\\dot{\\gamma}_0',      unit='s^{-1}'),
-    'srs':            dict(title='Strain-rate sensitivity exponent', symbol='m',                    unit=None),
-    'sigma0':         dict(title='Friction stress',                  symbol=r'\\sigma_0',            unit='MPa'),
-    'twin_spacing':   dict(title='Twin spacing',                     symbol=r'\\lambda',            unit='nm'),
-    'applied_stress': dict(title='Applied stress',                   symbol=r'\\sigma_{\\mathrm{app}}', unit='MPa'),
-    'W':              dict(title='Interface width',                  symbol='W',                   unit='nm'),
+    'rho0':           dict(title='Initial dislocation density',      symbol=r'\rho_0',                unit='m^{-2}'),
+    'mu':             dict(title='Shear modulus',                    symbol=r'\mu',                   unit='GPa'),
+    'gamma0_dot':     dict(title='Reference shear strain rate',      symbol=r'\dot{\gamma}_0',        unit='s^{-1}'),
+    'srs':            dict(title='Strain-rate sensitivity exponent', symbol='m',                      unit=None),
+    'sigma0':         dict(title='Friction stress',                  symbol=r'\sigma_0',              unit='MPa'),
+    'twin_spacing':   dict(title='Twin spacing',                     symbol=r'\lambda',               unit='nm'),
+    'applied_stress': dict(title='Applied stress',                   symbol=r'\sigma_{\mathrm{app}}', unit='MPa'),
+    'W':              dict(title='Interface width',                  symbol='W',                      unit='nm'),
 }
+
+
+# ----------------------------------------------------------------------------
+# v8.5.1: MATHTEXT HARDENING
+# ----------------------------------------------------------------------------
+def normalize_tex(s: Any) -> Any:
+    """Collapse runs of 2+ backslashes to a single backslash.
+
+    Repairs the class of transcription bug where a caller writes
+    r'\\\\rho_0' (raw string + doubled backslash) intending r'\\rho_0' or
+    r'\\rho_0'. Also repairs non-raw '\\\\\\\\rho' over-escaping.
+
+    Non-string input (None, int, etc.) is returned unchanged so callers
+    can safely pass any PARAM_META['symbol'] value through this filter.
+    """
+    if not isinstance(s, str):
+        return s
+    if '\\' not in s:
+        return s
+    # Match 2 or more consecutive backslashes and replace with one.
+    return re.sub(r'\\{2,}', r'\\', s)
+
+
+def strip_tex(s: Any) -> str:
+    """Plain-text fallback: drop $, backslashes, braces."""
+    if s is None:
+        return ''
+    return re.sub(r'[\\{}$]', '', str(s))
+
+
+# One shared parser instance — construction is cheap, but reusing it lets
+# matplotlib cache the parsed expression via its internal LRU.
+_MTX = MathTextParser('path')
+
+
+def safe_mathtext(s: Any, fallback: Optional[str] = None) -> str:
+    """Return `s` (with \\\\-runs normalized) if mathtext can parse it,
+    otherwise return a safe plain-text version.
+
+    This is the last line of defense: even if some future PARAM_META entry
+    or an LLM-generated evidence string leaks a malformed TeX fragment
+    into a text artist, the dashboard will render a degraded label instead
+    of raising inside fig.savefig() → Text._get_layout() and killing the
+    entire Streamlit render.
+    """
+    if s is None:
+        return ''
+    s = normalize_tex(str(s))
+    if '$' not in s:
+        return s
+    try:
+        _MTX.parse(s, dpi=100, prop=FontProperties())
+        return s
+    except Exception:
+        logger.warning("safe_mathtext: refusing to render malformed mathtext %r", s)
+        return fallback if fallback is not None else strip_tex(s)
 
 
 def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
@@ -685,6 +754,10 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
     """
     n = len(candidates)
     assert n == len(scores) == len(provenance), 'length mismatch'
+
+    # v8.5.1: repair any residual double-backslash transcription bugs before
+    # the symbol ever reaches an f-string that composes the axis label.
+    param_symbol = normalize_tex(param_symbol)
 
     order = np.argsort(candidates)                    # numeric order on x
     xs, cands = np.arange(n), [candidates[i] for i in order]
@@ -717,8 +790,8 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
 
     # ---- provenance encoded as marker SHAPE at each bar top ------------------
     for x, s, p in zip(xs, scs, provs):
-        st = PROVENANCE_MARKERS[p]
-        ax.plot([x], [s], marker=st['marker'], markersize=st['ms'],
+        st_ = PROVENANCE_MARKERS[p]
+        ax.plot([x], [s], marker=st_['marker'], markersize=st_['ms'],
                 linestyle='none', markerfacecolor='white',
                 markeredgecolor='black', markeredgewidth=1.1,
                 clip_on=False, zorder=6)
@@ -738,8 +811,10 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
     ax.set_ylim(0, max(scs) * headroom)
 
     # ---- x ticks in mathtext; unit stated ONCE, in the axis label -------------
+    # v8.5.1: every string handed to a text artist is filtered through
+    # safe_mathtext() so a future transcription bug cannot crash savefig.
     ax.set_xticks(xs)
-    ax.set_xticklabels([sci_tex(c) for c in cands])
+    ax.set_xticklabels([safe_mathtext(sci_tex(c)) for c in cands])
     ax.xaxis.set_minor_locator(NullLocator())        # no minor ticks between bars
     ax.set_xlim(-0.6, n - 0.4)
 
@@ -747,8 +822,8 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
     xlabel = ' '.join(parts)
     if unit:
         xlabel += f' ($\\mathrm{{{unit}}}$)'
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(score_label)
+    ax.set_xlabel(safe_mathtext(xlabel))
+    ax.set_ylabel(safe_mathtext(score_label))
 
     # ---- subtle y-only grid behind the bars ------------------------------------
     ax.yaxis.grid(True, linewidth=0.5, alpha=0.22)
@@ -760,11 +835,11 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
         ax.tick_params(which='both', top=False, right=False)
 
     # ---- legend from PROXY ARTISTS: shapes + best-match patch -----------------
-    handles = [Line2D([], [], marker=st['marker'], linestyle='none',
-                      markersize=st['ms'], markerfacecolor='white',
+    handles = [Line2D([], [], marker=st_['marker'], linestyle='none',
+                      markersize=st_['ms'], markerfacecolor='white',
                       markeredgecolor='black', markeredgewidth=1.1,
-                      label=st['label'])
-               for st in PROVENANCE_MARKERS.values()]
+                      label=st_['label'])
+               for st_ in PROVENANCE_MARKERS.values()]
     if best_x is not None:
         handles.append(Patch(facecolor=C_BEST, edgecolor=C_EDGE,
                              linewidth=0.8, label='Best match'))
@@ -775,7 +850,8 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
               columnspacing=1.4, handletextpad=0.4, borderaxespad=0.0)
 
     if title:
-        ax.set_title(title, pad=34, fontsize=style['font_size_large'])
+        ax.set_title(safe_mathtext(title), pad=34,
+                     fontsize=style['font_size_large'])
     # NOTE: for manuscripts drop the in-figure title entirely and put
     # "LatentMoE candidate scores vs. rho_0" in the figure caption instead.
     return fig
@@ -798,6 +874,13 @@ def render_candidate_score_chart(param_key, candidates, scores, provenance,
             symbol=PLASTICITY_ONTOLOGY.get(param_key, {}).get('symbol'),
             unit=None,
         )
+    # v8.5.1: normalize at the source so nothing downstream (f-strings,
+    # PARAM_META copies, cached dicts) can propagate a doubled backslash.
+    spec_meta = dict(spec_meta)
+    spec_meta['symbol'] = normalize_tex(spec_meta.get('symbol'))
+    spec_meta['title'] = normalize_tex(spec_meta.get('title'))
+    spec_meta['unit'] = normalize_tex(spec_meta.get('unit'))
+
     fig = plot_candidate_scores(candidates, scores, provenance, best_idx,
                                 param_title=spec_meta['title'],
                                 param_symbol=spec_meta['symbol'],
@@ -820,12 +903,12 @@ def render_candidate_score_chart(param_key, candidates, scores, provenance,
 #       provenance=['llm', 'llm', 'heuristic', 'heuristic', 'llm'],
 #       best_idx=1,
 #       param_title='Initial dislocation density',
-#       param_symbol=r'\\rho_0', unit='m^{-2}')
+#       param_symbol=r'\rho_0', unit='m^{-2}')
 #   fig.savefig('rho0_scores.png', dpi=600, bbox_inches='tight', pad_inches=0.05)
 #
 # Numeric-axis variant (one line converts every tick on any axis):
 #   ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: sci_tex(v)))
-#   ax.set_xlabel(r'Initial dislocation density $\\rho_0$ ($\\mathrm{m^{-2}}$)')
+#   ax.set_xlabel(r'Initial dislocation density $\rho_0$ ($\mathrm{m^{-2}}$)')
 
 # ============================================================================
 # ENHANCED SIMULATION DATABASE
@@ -4422,6 +4505,11 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
          SHAPE (D = LLM, ^ = heuristic); colour-blind & greyscale safe,
          with a proxy-artist legend placed ABOVE the axes (can never
          collide with bars or labels).
+
+    v8.5.1 hardening:
+      · PARAM_META symbols were r'\\\\rho_0' (raw + doubled) → mathtext
+        ParseException at draw time. Fixed to r'\\rho_0' + every label
+        string now flows through safe_mathtext().
     """
     selected_param = st.selectbox(
         "Select Parameter for Bar Chart",
@@ -4440,6 +4528,11 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
         selected_param,
         dict(title=spec['label'], symbol=spec['symbol'], unit=None),
     )
+    # v8.5.1: normalize every string that will end up in the figure.
+    meta = dict(meta)
+    meta['title'] = normalize_tex(meta.get('title'))
+    meta['symbol'] = normalize_tex(meta.get('symbol'))
+    meta['unit'] = normalize_tex(meta.get('unit'))
 
     candidates = [c.value_si / spec["ui_scale"] for c in cands]
     scores = [float(c.score) for c in cands]
@@ -5105,6 +5198,7 @@ def main():
     • <span style="color: green;">🔑 GATEKEEPER FIX:</span> alias canonicalization + per-param heuristic fallback + value coercion.<br>
     • <span style="color: green;">🎯 γ̇₀ FIX (v8.4.0):</span> prompt disambiguation + contextual heuristic + guaranteed fallback → all 5 params always populate.<br>
     • <span style="color: green;">📊 SCORE-CHART FIX (v8.5.0):</span> point-padded value labels, mathtext scientific notation (unit stated once), LLM/heuristic provenance as marker shape ◆/▲ with above-axes proxy-artist legend.<br>
+    • <span style="color: green;">🧬 MATHTEXT HARDENING (v8.5.1):</span> PARAM_META symbols are raw+single-backslash; normalize_tex/safe_mathtext guards prevent any malformed TeX from crashing the dashboard.<br>
     • <span style="color: green;">📊 PUBLICATION VISUALS:</span> Radar / Bars / Sankey / Treemap + full styling.<br>
     • <span style="color: green;">🐛 DEBUG TOGGLE:</span> raw LLM responses at INFO level when enabled.<br>
     </div>
