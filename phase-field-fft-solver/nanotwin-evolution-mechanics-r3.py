@@ -132,13 +132,10 @@ def update_plastic_strain(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
 
 
 # ============================================================================
-# ============================================================================
 #  CENTRAL COLORMAP INFRASTRUCTURE
 #  — one registry, one resolver, one namespace. Fixes Breaks #1–#5. —
 # ============================================================================
-# ============================================================================
 
-# ---- Publication-grade custom colormaps ------------------------------------
 def _build_custom_colormaps() -> Dict[str, Colormap]:
     plasma_enhanced = LinearSegmentedColormap.from_list('plasma_enhanced', [
         (0.0, '#0c0887'), (0.1, '#4b03a1'), (0.3, '#8b0aa5'),
@@ -170,6 +167,7 @@ def _build_custom_colormaps() -> Dict[str, Colormap]:
 
 _CUSTOM_COLORMAPS = _build_custom_colormaps()
 
+
 def _register_custom_colormaps() -> None:
     """Register custom colormaps once so `mpl.colormaps['name']` resolves."""
     for name, cmap in _CUSTOM_COLORMAPS.items():
@@ -177,7 +175,6 @@ def _register_custom_colormaps() -> None:
             if name not in mpl.colormaps:
                 mpl.colormaps.register(cmap, name=name, force=True)
         except (ValueError, AttributeError):
-            # Older matplotlib: fall back to pyplot registration
             try:
                 if name not in plt.colormaps():
                     plt.register_cmap(name=name, cmap=cmap)
@@ -204,6 +201,8 @@ class ColormapRegistry:
     """
 
     # Curated list — grouped so the dropdown reads nicely.
+    # Includes the reversed `_r` variants (used as defaults for diverging
+    # fields like phi) so the dropdown can always preselect them.
     BASE = [
         # Perceptually uniform
         'viridis', 'plasma', 'inferno', 'magma', 'cividis',
@@ -214,9 +213,19 @@ class ColormapRegistry:
         'binary', 'gist_yarg', 'gist_gray', 'gray', 'bone',
         'pink', 'spring', 'summer', 'autumn', 'winter', 'cool',
         'Wistia', 'hot', 'afmhot', 'gist_heat', 'copper',
-        # Diverging
-        'PiYG', 'PRGn', 'BrBG', 'PuOr', 'RdGy', 'RdBu', 'RdYlBu',
-        'RdYlGn', 'Spectral', 'coolwarm', 'bwr', 'seismic',
+        # Diverging (forward and reversed)
+        'PiYG', 'PiYG_r',
+        'PRGn', 'PRGn_r',
+        'BrBG', 'BrBG_r',
+        'PuOr', 'PuOr_r',
+        'RdGy', 'RdGy_r',
+        'RdBu', 'RdBu_r',
+        'RdYlBu', 'RdYlBu_r',
+        'RdYlGn', 'RdYlGn_r',
+        'Spectral', 'Spectral_r',
+        'coolwarm', 'coolwarm_r',
+        'bwr', 'bwr_r',
+        'seismic', 'seismic_r',
         'berlin', 'managua', 'vanimo',
         # Cyclic
         'twilight', 'twilight_shifted', 'hsv',
@@ -242,6 +251,13 @@ class ColormapRegistry:
             if n not in seen:
                 seen.add(n)
                 ordered.append(n)
+        # Also append any reversed variants that exist in mpl but are not
+        # yet listed (e.g. 'viridis_r'), so power users can still pick them.
+        for base in list(ordered):
+            rev = f'{base}_r'
+            if rev not in seen and rev in mpl.colormaps:
+                seen.add(rev)
+                ordered.append(rev)
         return ordered
 
     @classmethod
@@ -280,7 +296,8 @@ class ColormapRegistry:
         if name is None:
             return 'Viridis'
         key = str(name)
-        if key in PLOTLY_NAMED:
+        # Reversed names should sample RGB so the reversal is preserved.
+        if key in PLOTLY_NAMED and not key.endswith('_r'):
             return PLOTLY_NAMED[key]
         cmap = cls.resolve(name)
         t = np.linspace(0, 1, n)
@@ -291,7 +308,7 @@ class ColormapRegistry:
 
 # Named Plotly equivalents — checked before sampling RGB.
 PLOTLY_NAMED = {
-    'RdBu': 'RdBu', 'RdBu_r': 'RdBu', 'coolwarm': 'RdBu', 'bwr': 'RdBu',
+    'RdBu': 'RdBu', 'coolwarm': 'RdBu', 'bwr': 'RdBu',
     'seismic': 'RdBu', 'RdGy': 'RdBu', 'RdYlBu': 'RdBu',
     'hot': 'Hot', 'afmhot': 'Hot', 'gist_heat': 'Hot',
     'plasma': 'Plasma', 'plasma_enhanced': 'Plasma',
@@ -391,7 +408,7 @@ class MetadataManager:
             'dx': kwargs.get('dx', sim_params.get('dx', 0.5)),
             'dt': sim_params.get('dt', 1e-4),
             'created_at': datetime.now().isoformat(),
-            'colormaps': dict(resolved),  # canonical: {'phi': ..., 'sigma_eq': ...}
+            'colormaps': dict(resolved),
             'material_properties': sim_params.get('material_properties', {}),
             'simulation_parameters': {
                 'dt': sim_params.get('dt', 1e-4),
@@ -553,6 +570,95 @@ class JournalTemplates:
 
 # The list the UI dropdown consumes — resolved from the single registry.
 cmap_list: List[str] = ColormapRegistry.list_all()
+
+
+# ============================================================================
+# COLORMAP SELECTION PANELS
+# Bodies of the "Global Colormaps" / "Simulation-Specific Colormaps"
+# expanders in main(). (These were referenced but missing — NameError fix.)
+# ============================================================================
+
+_INHERIT_LABEL = '⟪ Inherit Global ⟫'
+
+
+def _split_fields_evenly(n_cols: int) -> List[List[str]]:
+    """Split FIELD_DEFAULT_CMAPS keys as evenly as possible across n_cols."""
+    fields = list(FIELD_DEFAULT_CMAPS.keys())
+    n_cols = max(1, n_cols)
+    per = (len(fields) + n_cols - 1) // n_cols
+    return [fields[i * per:(i + 1) * per] for i in range(n_cols)]
+
+
+def _cmap_options_for_field(field: str) -> Tuple[List[str], int]:
+    """Options + default index for a field's selectbox.
+
+    Guarantees the field's default is present and preselected, even if it's
+    not in the curated BASE list.
+    """
+    default = FIELD_DEFAULT_CMAPS.get(field, 'viridis')
+    options = list(cmap_list)
+    if default not in options:
+        options.insert(0, default)
+    return options, options.index(default)
+
+
+def render_global_colormap_panel_compact(cols) -> Dict[str, str]:
+    """
+    Renders one compact selectbox per field, split across the given columns
+    (7 fields over 2 columns → 4 + 3). Returns {field: cmap_name}.
+    """
+    global_sel: Dict[str, str] = {}
+    for col, field_group in zip(cols, _split_fields_evenly(len(cols))):
+        with col:
+            for field in field_group:
+                label = FIELD_LABELS.get(field, field)
+                options, default_idx = _cmap_options_for_field(field)
+                choice = st.selectbox(
+                    label, options, index=default_idx,
+                    key=f'global_cmap_{field}',
+                    help='Global default for this field. A simulation-specific '
+                         'choice overrides it.')
+                global_sel[field] = choice
+    st.session_state['global_colormap_selection'] = dict(global_sel)
+    return global_sel
+
+
+def render_simulation_colormap_panel_compact(cols) -> Dict[str, str]:
+    """
+    Same layout, but every field defaults to '⟪ Inherit Global ⟫'.
+    Returns {field: cmap_name or INHERIT}.
+    """
+    sim_sel: Dict[str, str] = {}
+    options = [_INHERIT_LABEL] + list(cmap_list)
+    for col, field_group in zip(cols, _split_fields_evenly(len(cols))):
+        with col:
+            for field in field_group:
+                label = FIELD_LABELS.get(field, field)
+                choice = st.selectbox(
+                    label, options, index=0,
+                    key=f'sim_cmap_{field}',
+                    help='Override the global colormap for this simulation only.')
+                sim_sel[field] = INHERIT if choice == _INHERIT_LABEL else choice
+    st.session_state['sim_colormap_selection'] = dict(sim_sel)
+    return sim_sel
+
+
+def apply_colormap_selections_to_params(sim_params: Dict[str, Any],
+                                        global_sel: Optional[Dict[str, str]] = None,
+                                        sim_sel: Optional[Dict[str, str]] = None
+                                        ) -> Dict[str, str]:
+    """
+    Write selections into sim_params under the exact key names
+    MetadataManager.create_metadata() falls back to, and store the
+    resolved mapping under 'resolved_colormaps'. Returns the resolved dict.
+    """
+    resolved = resolve_field_colormaps(global_sel, sim_sel)
+    for field, name in (global_sel or {}).items():
+        sim_params[f'global_cmap_{field}'] = name
+    for field, name in (sim_sel or {}).items():
+        sim_params[f'cmap_{field}'] = name
+    sim_params['resolved_colormaps'] = dict(resolved)
+    return resolved
 
 
 # ============================================================================
@@ -1084,7 +1190,6 @@ class EnhancedTwinVisualizer:
         self.extent = [-N*dx/2, N*dx/2, -N*dx/2, N*dx/2]
         self.line_profiler = EnhancedLineProfiler(N, dx)
 
-    # -- Colormap resolution routed through the single registry --------------
     def get_colormap(self, cmap_name):
         """
         Resolve a name (or Colormap) to a matplotlib Colormap.
@@ -1092,16 +1197,13 @@ class EnhancedTwinVisualizer:
         """
         return ColormapRegistry.resolve(cmap_name)
 
-    # ------------------------------------------------------------------------
     @handle_errors
     def create_multi_field_comparison(self, results_dict, style_params=None):
         if style_params is None:
             style_params = {}
 
-        # Canonical colormaps dict (may be empty)
         colormaps = style_params.get('colormaps') or {}
 
-        # Non-colormap styling defaults
         defaults = {
             'title_font_size': 10, 'label_font_size': 8,
             'scalebar_color': 'black', 'scalebar_fontsize': 8,
@@ -1145,7 +1247,6 @@ class EnhancedTwinVisualizer:
             elif field_name == 'sigma_y':
                 data = data / 1e6
 
-            # >>> THE FIX: consult canonical dict first, then legacy key, then default
             cmap_name = (colormaps.get(field_name)
                          or style_params.get(f'{field_name}_cmap')
                          or FIELD_DEFAULT_CMAPS.get(field_name, 'viridis'))
@@ -1190,7 +1291,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------------
     @handle_errors
     def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0,
                               cmap_name: Optional[str] = None,
@@ -1207,11 +1307,9 @@ class EnhancedTwinVisualizer:
         elif field_name == 'h':
             unit = " (nm)"
 
-        # --- The Plotly path now respects the same selection as matplotlib ---
         chosen = cmap_name or FIELD_DEFAULT_CMAPS.get(field_name, 'viridis')
         colorscale = ColormapRegistry.to_plotly(chosen)
 
-        # zmid: default to a physically-sensible centre for signed fields
         if zmid is None:
             if field_name in ('phi', 'sigma_h'):
                 zmid = 0
@@ -1279,11 +1377,9 @@ class EnhancedTwinVisualizer:
         elif field_name == 'h':
             unit = " (nm)"
 
-        # --- Respect the same colormap selection as the 2D path ---
         chosen = cmap_name or FIELD_DEFAULT_CMAPS.get(field_name, 'viridis')
         colorscale = ColormapRegistry.to_plotly(chosen)
 
-        # Colour range — keep diverging fields symmetric about zero
         if field_name == 'phi':
             cmin, cmax = -1.2, 1.2
         elif field_name == 'eta1':
@@ -1975,59 +2071,6 @@ class ParameterSweep:
 
 
 # ============================================================================
-# ============================================================================
-#  COLOURMAP-AWARE UI WIDGETS
-#  Every selectbox goes through `resolve_field_colormaps`.
-# ============================================================================
-# ============================================================================
-
-def _seed_global_defaults() -> Dict[str, str]:
-    """Global colormap selection, seeded from the canonical defaults."""
-    return dict(FIELD_DEFAULT_CMAPS)
-
-
-def render_global_colormap_panel(container) -> Dict[str, str]:
-    """Render one selectbox per field for the *global* selection."""
-    global_sel: Dict[str, str] = {}
-    cols = container.columns(2)
-    for i, (field, default) in enumerate(FIELD_DEFAULT_CMAPS.items()):
-        col = cols[i % 2]
-        idx = cmap_list.index(default) if default in cmap_list else 0
-        global_sel[field] = col.selectbox(
-            f"Global {FIELD_LABELS[field]}",
-            cmap_list, index=idx,
-            key=f'g_cmap_{field}',
-        )
-    return global_sel
-
-
-def render_simulation_colormap_panel(container,
-                                     sim_meta_cmaps: Optional[Dict[str, str]] = None
-                                     ) -> Dict[str, str]:
-    """
-    Render one selectbox per field for the *simulation-specific* selection.
-    The first entry is the INHERIT sentinel.  If a saved run supplies
-    `sim_meta_cmaps`, those are used as the initial selection (Break #2 fix).
-    """
-    sim_sel: Dict[str, str] = {}
-    cols = container.columns(2)
-    for i, (field, default) in enumerate(FIELD_DEFAULT_CMAPS.items()):
-        col = cols[i % 2]
-        options = [INHERIT] + cmap_list
-        meta_val = (sim_meta_cmaps or {}).get(field, INHERIT)
-        if meta_val not in options:
-            meta_val = INHERIT
-        sim_sel[field] = col.selectbox(
-            f"Simulation {FIELD_LABELS[field]}",
-            options,
-            index=options.index(meta_val),
-            format_func=lambda s: '— inherit global —' if s == INHERIT else s,
-            key=f's_cmap_{field}',
-        )
-    return sim_sel
-
-
-# ============================================================================
 # MAIN STREAMLIT APP
 # ============================================================================
 def main():
@@ -2059,9 +2102,10 @@ def main():
     • <span style="color: green;">PURE FFT:</span> all spatial derivatives are exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional stability for large Δt.<br>
     • <span style="color: green;">ONE COLORMAP NAMESPACE:</span> canonical keys <code>phi, sigma_eq, sigma_h, h, eta1, …</code> used everywhere.<br>
-    • <span style="color: green;">INHERIT SENTINEL:</span> simulation-specific selectors can defer to the global choice.<br>
-    • <span style="color: green;">PLOTLY BRIDGE:</span> interactive 2D/3D views now respect the same selection.<br>
+    • <span style="color: green;">INHERIT SENTINEL:</span> simulation-specific selectors defer to the global choice.<br>
+    • <span style="color: green;">PLOTLY BRIDGE:</span> interactive 2D/3D views respect the same selection.<br>
     • <span style="color: green;">LOUD FALLBACKS:</span> unavailable names warn instead of silently reverting.<br>
+    • <span style="color: green;">PANEL FIX:</span> global/simulation colormap panels are back — no more NameError.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2091,7 +2135,7 @@ def main():
                     del st.session_state[k]
             # Reset colormap widget keys
             for f in FIELD_DEFAULT_CMAPS:
-                for prefix in ('g_cmap_', 's_cmap_'):
+                for prefix in ('global_cmap_', 'sim_cmap_'):
                     key = f'{prefix}{f}'
                     if key in st.session_state:
                         del st.session_state[key]
@@ -2175,7 +2219,7 @@ def main():
             st.subheader("🎨 Colormap Settings")
             st.caption(
                 "Every field has a **global** choice and a **simulation-specific** "
-                "override.  Selecting `— inherit global —` on the simulation side "
+                "override.  Selecting `⟪ Inherit Global ⟫` on the simulation side "
                 "defers to the global choice.  Unknown names warn rather than "
                 "silently reverting."
             )
@@ -2196,7 +2240,6 @@ def main():
                                           key="scalebar_fontsize")
 
             if st.button("🚀 Initialize Simulation", type="primary", use_container_width=True):
-                resolved = resolve_field_colormaps(global_sel, sim_sel)
                 params = {
                     'material': material_choice,
                     'N': N, 'dx': dx, 'dt': dt,
@@ -2216,16 +2259,11 @@ def main():
                     'n_steps': n_steps, 'save_frequency': save_frequency,
                     'stability_factor': stability_factor,
                     'confine_twin': confine_twin,
-                    # canonical namespace
-                    'resolved_colormaps': resolved,
-                    # per-field mirror, so downstream code that reads
-                    # `params['cmap_phi']`-style keys still works
-                    **{f'cmap_{f}': v for f, v in resolved.items()},
-                    **{f'global_cmap_{f}': v for f, v in global_sel.items()},
-                    **{f'sim_cmap_{f}': v for f, v in sim_sel.items()},
                     'scalebar_color': scalebar_color,
-                    'scalebar_fontsize': scalebar_fontsize
+                    'scalebar_fontsize': scalebar_fontsize,
                 }
+                # Bridge the selections into params under every expected key
+                resolved = apply_colormap_selections_to_params(params, global_sel, sim_sel)
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
                     params['defect_pos'] = (defect_x, defect_y)
@@ -2250,9 +2288,11 @@ def main():
                             gb_profile.lower(), gb_curvature)
                     st.session_state.initial_geometry = {
                         'phi': phi, 'eta1': eta1, 'eta2': eta2,
-                        'geom_viz': geom_viz, 'params': params}
+                        'geom_viz': geom_viz, 'params': params,
+                        'resolved_colormaps': resolved}
                     st.session_state.initialized = True
                     st.success("✅ Simulation initialized successfully!")
+                    st.caption(f"Effective colormaps: `{resolved}`")
 
         elif operation_mode == "Compare Saved Simulations":
             st.header("🔍 Comparison Configuration")
@@ -2278,7 +2318,6 @@ def main():
                      "h (Twin Spacing)", "sigma_y (Yield Stress)"], index=2)
                 field_key = field_to_compare.split()[0]
 
-                # Per-comparison colormap override (single colour used for the whole view)
                 st.markdown("### 🎨 Comparison Colormap")
                 comparison_cmap = st.selectbox(
                     f"Colormap for {FIELD_LABELS.get(field_key, field_key)}",
@@ -2374,7 +2413,6 @@ def main():
                 sweep_values = np.linspace(sweep_min, sweep_max, sweep_steps)
             st.write(f"Sweep values: {sweep_values}")
 
-            # Colormap used for the sweep's saved runs
             st.subheader("🎨 Sweep Colormaps")
             sweep_cols = st.columns(2)
             sweep_global_sel = render_global_colormap_panel_compact(sweep_cols)
@@ -2394,8 +2432,8 @@ def main():
                 'applied_stress_angle': 0.0,
                 'n_steps': n_steps_sweep, 'save_frequency': save_freq_sweep,
                 'stability_factor': 0.5, 'confine_twin': True,
-                'resolved_colormaps': resolve_field_colormaps(sweep_global_sel, None)
             }
+            apply_colormap_selections_to_params(base_params, sweep_global_sel, None)
             if geom_type_sweep == "Twin Grain with Defect":
                 base_params['defect_type'] = 'dislocation'
                 base_params['defect_pos'] = (0.0, 0.0)
@@ -2427,7 +2465,7 @@ def main():
         else:
             st.success(f"Loaded {len(simulations)} simulations")
             sim_names = [build_sim_name(sim['params'], sim['id']) for sim in simulations]
-            chosen_cmap = config.get('cmap')  # per-comparison override
+            chosen_cmap = config.get('cmap')
 
             if config['type'] == "Side-by-Side Heatmaps":
                 last_frames = []
@@ -2459,8 +2497,8 @@ def main():
                                 data = data / 1e6
                             extent = [-sim['params']['N']*sim['params']['dx']/2,
                                       sim['params']['N']*sim['params']['dx']/2] * 2
-                            cmap = ColormapRegistry.resolve(chosen_cmap
-                                                            or FIELD_DEFAULT_CMAPS.get(field, 'viridis'))
+                            cmap = ColormapRegistry.resolve(
+                                chosen_cmap or FIELD_DEFAULT_CMAPS.get(field, 'viridis'))
                             im = ax.imshow(data, extent=extent, cmap=cmap,
                                            origin='lower')
                             ax.set_title(sim_names[sim_idx][:30] + "...", fontsize=8)
@@ -2603,9 +2641,7 @@ def main():
             st.header(f"📊 Single Simulation: {build_sim_name(sim_data['params'], sim_id)}")
             params = sim_data['params']
 
-            # ---- Load saved colormaps from metadata (Break #2) ----
             meta_cmaps = (sim_data.get('metadata', {}) or {}).get('colormaps', {}) or {}
-            # Every field falls back to its default if the metadata lacks it
             live_cmaps = {f: meta_cmaps.get(f, FIELD_DEFAULT_CMAPS[f])
                           for f in FIELD_DEFAULT_CMAPS}
 
@@ -2621,7 +2657,6 @@ def main():
             with col4:
                 st.metric("κ₀", f"{params.get('kappa0', 0):.2f}")
 
-            # ---- Live colormap editor for this sim ----
             with st.expander("🎨 Edit colormaps for this simulation", expanded=False):
                 st.caption(
                     "Changes take effect immediately on the figure below. "
@@ -2685,7 +2720,6 @@ def main():
                     st.pyplot(fig)
                     plt.close(fig)
 
-                # Plotly heatmap honours the same effective cmaps
                 with st.expander("🖼️ Interactive 2D (Plotly)", expanded=False):
                     field_choice = st.selectbox(
                         "Field",
@@ -2720,7 +2754,7 @@ def main():
         effective_cmaps = (params.get('resolved_colormaps')
                            or resolve_field_colormaps(
                                {f: params.get(f'global_cmap_{f}') for f in FIELD_DEFAULT_CMAPS},
-                               {f: params.get(f'sim_cmap_{f}') for f in FIELD_DEFAULT_CMAPS}))
+                               {f: params.get(f'cmap_{f}') for f in FIELD_DEFAULT_CMAPS}))
         style_extra = {
             'scalebar_color': params.get('scalebar_color', 'black'),
             'scalebar_fontsize': params.get('scalebar_fontsize', 10),
@@ -2821,7 +2855,6 @@ def main():
                                       len(results_history)-1)
                 results = results_history[frame_idx]
 
-                # Live colormap overrides for the current view only
                 with st.expander("🎨 Live colormap overrides (this view only)", expanded=False):
                     live_cols = st.columns(2)
                     live_cmaps = dict(effective_cmaps)
