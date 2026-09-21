@@ -1,6 +1,6 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.2              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                    ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)                ███
@@ -20,9 +20,7 @@
 # ███     to G_V, G_R, G_H, C', Zener A. NO LLM arithmetic is used.      ███
 # ███   · A second retrieval pass (FUNDAMENTAL_QUERIES) targets Cij      ███
 # ███     tables that the μ-alias query misses.                          ███
-# ███   · Provenance extended to 3 tiers: llm / llm_derived / heuristic. ███
-# ███     _norm_provenance now checks 'derived' BEFORE 'llm' (order-     ███
-# ███     sensitive because 'llm_derived' contains 'llm').               ███
+# ███   · Provenance extended to 3 tiers: llm / fundamental / heuristic. ███
 # ███   · Dimensionless-context veto purges "μ = 1" reduced-units        ███
 # ███     candidates from the μ pool (was contaminating the bar chart    ███
 # ███     with 1.00 GPa entries at score ~0.76).                         ███
@@ -44,6 +42,25 @@
 # ███   · New helpers: _render_prompt() and _audit_prompt_tokens().      ███
 # ███   · Defensive safe_format() wrapper kept for any other .format()   ███
 # ███     call sites that might be added in future.                      ███
+# ███ FIX (v8.8.2): DYNAMIC PROVENANCE LEGEND + 'fundamental' KEY        ███
+# ███   · PROVENANCE_MARKERS previously iterated over *every* entry, so  ███
+# ███     the "fundamental: Cij → VRH" marker appeared on EVERY chart —  ███
+# ███     including ρ₀, where VRH of elastic constants is meaningless.   ███
+# ███   · The provenance key was named 'llm_derived', a poor name for a  ███
+# ███     route whose whole point is that NO LLM arithmetic is used.     ███
+# ███     Renamed to 'fundamental' (first-class), with backward-compat   ███
+# ███     so old cached extractions still canonicalize correctly.        ███
+# ███   · plot_candidate_scores() now builds the legend DYNAMICALLY: it  ███
+# ███     collects the unique normalized provenance keys that ACTUALLY   ███
+# ███     appear among the current candidates and only renders those     ███
+# ███     markers.  No more ghost entries.                               ███
+# ███   · _norm_provenance() order is load-bearing: 'llm_derived' (and   ███
+# ███     anything containing 'derived'/'vrh'/'cij'/'c11'/'c12'/'c44')   ███
+# ███     MUST be tested BEFORE 'llm' — otherwise 'llm_derived' would    ███
+# ███     silently bucket as a direct extraction.  Documented inline.    ███
+# ███   · New thin helper _compute_vrh_shear_modulus(C11, C12, C44) ->   ███
+# ███     float, alias over derive_shear_modulus_vrh()['G_H'], for       ███
+# ███     call-site symmetry.                                            ███
 # ============================================================================
 
 import numpy as np
@@ -719,42 +736,75 @@ class PublicationEnhancer:
 
 
 # ============================================================================
-# LATENTMoE CANDIDATE-SCORE BAR CHART (v8.5.0 / 8.5.1 / 8.6.0 / 8.7.0 / 8.8.0)
+# LATENTMoE CANDIDATE-SCORE BAR CHART (v8.5.0 / 8.5.1 / 8.6.0 / 8.7.0 / 8.8.x)
 # ============================================================================
-# v8.8.0 changes the provenance taxonomy from binary to three-tier:
-#   · llm           — direct LLM extraction of the target parameter
-#   · llm_derived   — LLM extracted fundamentals (Cij), code derived the value
-#   · heuristic     — regex / curated default
-# The order of checks inside _norm_provenance matters: 'llm_derived' contains
-# the substring 'llm', so the derived test MUST run first, otherwise every
-# VRH-derived candidate would be silently relabelled as a direct extraction.
+# v8.8.0 introduced a three-tier provenance taxonomy:
+#   · llm          — direct LLM extraction of the target parameter
+#   · fundamental  — LLM extracted fundamentals (Cij), code derived the value
+#                    via Voigt-Reuss-Hill averaging.  NO LLM arithmetic.
+#   · heuristic    — regex / curated default
+#
+# v8.8.2 renamed the middle tier from 'llm_derived' to 'fundamental' (better
+# semantic fit — the point of the VRH route is that the derivation is *code*,
+# not the LLM) and made the legend render dynamically, so a marker only
+# appears if at least one candidate on the current chart actually carries
+# that provenance.  Previously the legend iterated over every entry in
+# PROVENANCE_MARKERS, which put "fundamental: Cij → VRH" on every chart —
+# including ρ₀, where VRH of elastic constants is physically meaningless.
 
 PROVENANCE_MARKERS = {
     'llm':         dict(marker='D', ms=6.0,
                         label='LLM inference (direct)'),
-    'llm_derived': dict(marker='o', ms=6.5,
+    'fundamental': dict(marker='o', ms=6.5,
                         label=r'LLM inference (fundamental: $C_{ij}\to$VRH)'),
     'heuristic':   dict(marker='^', ms=7.5,
                         label='Heuristic / curated default'),
 }
 
+# Rendering order for the legend, used to keep the visual order stable
+# across charts regardless of which subset of provenances is actually
+# present.  Any key not in PROVENANCE_MARKERS is ignored.
+_PROVENANCE_ORDER: Tuple[str, ...] = ('llm', 'fundamental', 'heuristic')
 
-def _norm_provenance(p):
-    """Three-tier canonicalization.
 
-    ORDER IS LOAD-BEARING: 'llm_derived' contains 'llm', so we MUST test the
-    derivation keywords first.  Otherwise every derived candidate would be
-    silently bucketed as a direct extraction and the VRH route would be
-    invisible in the figure.
+def _norm_provenance(p: Any) -> str:
+    """Three-tier canonicalization of a candidate's provenance string.
+
+    ORDER IS LOAD-BEARING.  Both 'llm_derived' (legacy, v8.8.0) and
+    'fundamental' (v8.8.2) contain substrings that would also match the
+    *direct*-extraction bucket ('llm', 'derived' etc.).  We therefore test
+    the derivation keywords FIRST, so a VRH-derived candidate can never be
+    silently relabelled as a direct LLM extraction — which would make the
+    ○ marker vanish from the legend and hide the VRH route entirely.
+
+    Recognised derivations → 'fundamental':
+        'fundamental', 'derived', 'llm_derived' (legacy),
+        'vrh', 'voigt', 'reuss', 'hill',
+        'cij', 'c11', 'c12', 'c44',
+        'elastic_constants'
+    Recognised direct extractions → 'llm':
+        'llm', 'inferred', 'model', 'ai', 'explicit', 'direct'
+    Everything else → 'heuristic'.
     """
     p = str(p).strip().lower()
-    if any(k in p for k in ('cij', 'c11', 'c12', 'c44', 'derived',
-                            'vrh', 'voigt', 'reuss', 'hill', 'fundamental')):
-        return 'llm_derived'
+    if any(k in p for k in ('fundamental', 'derived',
+                            'vrh', 'voigt', 'reuss', 'hill',
+                            'cij', 'c11', 'c12', 'c44',
+                            'elastic_constants')):
+        return 'fundamental'
     if any(k in p for k in ('llm', 'inferred', 'model', 'ai',
                             'explicit', 'direct')):
         return 'llm'
     return 'heuristic'
+
+
+def _ordered_visible_provenance(provs: List[str]) -> List[str]:
+    """Return the unique normalized provenance keys present in `provs`,
+    sorted by the canonical `_PROVENANCE_ORDER` so the legend reads the
+    same way across charts regardless of candidate ordering."""
+    present = {_norm_provenance(p) for p in provs}
+    present.discard(None)
+    return [k for k in _PROVENANCE_ORDER if k in present]
 
 
 def sci_tex(value, unit=None, decimals=1):
@@ -967,7 +1017,9 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
                     elinewidth=0.8, capsize=3, zorder=5)
 
     for x, s, p in zip(xs, scs, provs):
-        st_ = PROVENANCE_MARKERS[p]
+        st_ = PROVENANCE_MARKERS.get(p)
+        if st_ is None:
+            continue
         bar_rgb = _color_to_rgb(faces[x])
         lum = _relative_luminance(bar_rgb)
         marker_edge = 'black' if lum > 0.55 else 'white'
@@ -1025,22 +1077,44 @@ def plot_candidate_scores(candidates, scores, provenance, best_idx=None, *,
         cbar.set_label(colorbar_label, fontsize=cbar_fs)
         cbar.ax.tick_params(labelsize=ctick_fs)
 
-    handles = [Line2D([], [], marker=st_['marker'], linestyle='none',
-                      markersize=st_['ms'], markerfacecolor='white',
-                      markeredgecolor='black', markeredgewidth=1.1,
-                      label=safe_mathtext(st_['label']))
-               for st_ in PROVENANCE_MARKERS.values()]
+    # ------------------------------------------------------------------
+    # v8.8.2: DYNAMIC LEGEND.
+    #
+    # Previously we iterated over PROVENANCE_MARKERS.values() and therefore
+    # drew EVERY marker on EVERY chart, even when a provenance type was not
+    # actually present among the candidates.  That put the
+    # "fundamental: Cij → VRH" entry on charts for ρ₀, σ₀, γ̇₀, etc., where
+    # it cannot possibly apply (VRH averaging of elastic constants yields a
+    # shear modulus, and nothing else).
+    #
+    # We now collect the unique normalized provenance keys that ACTUALLY
+    # appear among the current candidates, ordered by _PROVENANCE_ORDER for
+    # visual stability, and only render those markers.
+    # ------------------------------------------------------------------
+    visible_provs = _ordered_visible_provenance(provs)
+    handles: List[Any] = []
+    for p_key in visible_provs:
+        st_ = PROVENANCE_MARKERS[p_key]
+        handles.append(
+            Line2D([], [], marker=st_['marker'], linestyle='none',
+                   markersize=st_['ms'], markerfacecolor='white',
+                   markeredgecolor='black', markeredgewidth=1.1,
+                   label=safe_mathtext(st_['label']))
+        )
+
     if best_x is not None:
         handles.append(Patch(facecolor=faces[best_x],
                              edgecolor=C_EDGE, linewidth=0.8,
                              label='Best match'))
-    ax.legend(handles=handles, loc='lower left',
-              bbox_to_anchor=(0.0, legend_anchor_y),
-              ncol=len(handles), frameon=False,
-              fontsize=leg_fs,
-              columnspacing=legend_columnspacing,
-              handletextpad=legend_handletextpad,
-              borderaxespad=legend_borderaxespad)
+
+    if handles:
+        ax.legend(handles=handles, loc='lower left',
+                  bbox_to_anchor=(0.0, legend_anchor_y),
+                  ncol=len(handles), frameon=False,
+                  fontsize=leg_fs,
+                  columnspacing=legend_columnspacing,
+                  handletextpad=legend_handletextpad,
+                  borderaxespad=legend_borderaxespad)
 
     if title:
         title_pad = 34.0 + max(0.0, leg_fs - 8.0) * 2.0
@@ -2436,11 +2510,12 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1             ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.2             ██████
 # ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors       ██████
 # ███  DUAL-MODE PROMPTS + Chain-of-Thought                             ██████
 # ███  v8.8.0: VRH DERIVATION LAYER                                    ██████
 # ███  v8.8.1: PROMPT TEMPLATING FIX (IndexError: Replacement index 1) ██████
+# ███  v8.8.2: DYNAMIC PROVENANCE LEGEND + 'fundamental' KEY           ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -2799,9 +2874,9 @@ def _pl_fmt(param: str, si_value: float) -> str:
 # v8.8.0: VRH DERIVATION LAYER (pure Python, no LLM arithmetic)
 # ============================================================================
 # The LLM finds and transcribes C11/C12/C44 VERBATIM.  This layer does every
-# bit of the arithmetic.  That division is the point of the
-# 'llm_derived' provenance label: the LLM's contribution is evidence
-# discovery; the derivation is reproducible, citable code.
+# bit of the arithmetic.  That division is the point of the 'fundamental'
+# provenance label: the LLM's contribution is evidence discovery; the
+# derivation is reproducible, citable code.
 
 def _cij_in_gpa(value: float, unit: str) -> float:
     """Convert a raw Cij value to GPa.  Defaults to GPa when unit is empty,
@@ -2834,6 +2909,20 @@ def derive_shear_modulus_vrh(C11: float, C12: float, C44: float) -> Dict[str, fl
     GH = 0.5 * (GV + GR)
     return dict(C_prime=Cp, G_V=GV, G_R=GR, G_H=GH,
                 zener_A=2.0 * C44 / max(C11 - C12, 1e-12))
+
+
+def _compute_vrh_shear_modulus(C11: float, C12: float, C44: float) -> float:
+    """Scalar Voigt-Reuss-Hill average shear modulus.
+
+    Thin alias over `derive_shear_modulus_vrh` returning just the Hill value.
+    Kept for call-site symmetry with the diagnostic's suggested API so that
+    downstream code can do:
+
+        mu_gh = _compute_vrh_shear_modulus(C11, C12, C44)
+
+    without having to unpack the dict.
+    """
+    return derive_shear_modulus_vrh(C11, C12, C44)['G_H']
 
 
 def cij_plausible(C11: Optional[float],
@@ -3893,7 +3982,8 @@ class PlasticityLatentMoEScorer:
             "heuristic": 0.3,
             "explicit": 0.9,
             "llm_inferred": 0.5,
-            "llm_derived": 0.85,   # v8.8.0: deterministic derivation
+            "fundamental": 0.85,     # v8.8.2: deterministic VRH derivation
+            "llm_derived": 0.85,     # v8.8.0 legacy alias (kept for caches)
             "default_fallback": 0.3,
         }.get((method or "").lower(), 0.5)
 
@@ -3901,7 +3991,8 @@ class PlasticityLatentMoEScorer:
     def _reasoning_expert(reasoning: str, method: str) -> float:
         method_l = (method or "").lower()
         if method_l not in ("llm_inferred", "heuristic",
-                            "default_fallback", "llm_derived"):
+                            "default_fallback",
+                            "fundamental", "llm_derived"):
             return 0.5
         if not reasoning:
             return 0.2
@@ -4003,7 +4094,8 @@ def augment_candidates_with_derived_mu(
         top_k: int = 8,
 ) -> Tuple[Dict[str, List[PlasticityCandidate]], int, int]:
     """Group C11/C12/C44 extractions by source document, run VRH in code,
-    inject G_H / G_R / G_V as 'mu' candidates with provenance 'llm_derived'.
+    inject G_H / G_R / G_V as 'mu' candidates with provenance 'fundamental'
+    (v8.8.2; formerly 'llm_derived' in v8.8.0).
 
     Returns (candidates, n_derived_added, n_dimensionless_excluded).
     """
@@ -4081,7 +4173,7 @@ def augment_candidates_with_derived_mu(
 
         # G_H — canonical VRH-Hill value (ranked first among the trio)
         score_hill = scorer.score_derived(
-            method='llm_derived', material=mat, temp_k=temp,
+            method='fundamental', material=mat, temp_k=temp,
             target_material=target_material, target_temp=target_temp,
             reasoning=reasoning_hill, confidence=0.75,
         )
@@ -4095,7 +4187,7 @@ def augment_candidates_with_derived_mu(
             material=mat,
             temp_k=temp,
             strain_rate=None,
-            method='llm_derived',
+            method='fundamental',
             source_file=src_file,
             source_title=src_title,
             evidence=f"VRH-Hill: {quote}",
@@ -4116,7 +4208,7 @@ def augment_candidates_with_derived_mu(
             material=mat,
             temp_k=temp,
             strain_rate=None,
-            method='llm_derived',
+            method='fundamental',
             source_file=src_file,
             source_title=src_title,
             evidence=f"VRH-Reuss: {quote}",
@@ -4137,7 +4229,7 @@ def augment_candidates_with_derived_mu(
             material=mat,
             temp_k=temp,
             strain_rate=None,
-            method='llm_derived',
+            method='fundamental',
             source_file=src_file,
             source_title=src_title,
             evidence=f"VRH-Voigt: {quote}",
@@ -4152,8 +4244,10 @@ def augment_candidates_with_derived_mu(
     filtered_mu: List[PlasticityCandidate] = []
     for c in new_mu:
         # Never apply the veto to derived candidates (their Cij inputs have
-        # already passed cij_plausible) or to explicit quotes.
-        if c.method in ('llm_derived', 'explicit'):
+        # already passed cij_plausible) or to explicit quotes.  Accept both
+        # the v8.8.2 key ('fundamental') and the v8.8.0 legacy key
+        # ('llm_derived') so candidates from a stale on-disk cache survive.
+        if c.method in ('fundamental', 'llm_derived', 'explicit'):
             filtered_mu.append(c)
             continue
         if c.is_dimensionless:
@@ -4659,8 +4753,13 @@ def _plr_render_parameter_selector(param: str,
         # v8.8.0: surface provenance tag in the option label so the user can
         # tell at a glance whether the top pick is a direct extraction or a
         # VRH-derived value.
+        #
+        # v8.8.2: the key is now 'fundamental' (was 'llm_derived').  Because
+        # _norm_provenance() canonicalizes both spellings to 'fundamental',
+        # the tag lookup succeeds regardless of which one the candidate
+        # carries.
         _prov_tag = {
-            'llm_derived': ' 🔬 VRH',
+            'fundamental': ' 🔬 VRH',
             'llm':         ' 🦙 direct',
             'heuristic':   ' ⚙️ heuristic',
         }.get(_norm_provenance(best.method), '')
@@ -4672,7 +4771,7 @@ def _plr_render_parameter_selector(param: str,
 
     for i, c in enumerate(bundle.candidates.get(param, [])[1:], start=1):
         _prov_tag = {
-            'llm_derived': ' [VRH]',
+            'fundamental': ' [VRH]',
             'llm':         '',
             'heuristic':   ' [heur]',
         }.get(_norm_provenance(c.method), '')
@@ -4750,7 +4849,7 @@ def render_plasticity_recommender_sidebar(
     default_strain_rate: float = 1e-3,
     ollama_model: str = "qwen2.5:7b",
 ):
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.1")
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.2")
     st.caption(
         "FAISS + SentenceTransformer retrieval · Ollama NER · LatentMoE scoring · "
         "dual-mode prompts · param-alias canonicalization · "
@@ -4759,7 +4858,10 @@ def render_plasticity_recommender_sidebar(
         "Provenance is now three-tier: **direct** (🦙) vs **fundamental** "
         "(🔬 VRH) vs **heuristic** (⚙️). "
         "**v8.8.1:** prompt rendering switched to `<<TOKEN>>` replacement — "
-        "no more `IndexError` from braces inside the JSON schema."
+        "no more `IndexError` from braces inside the JSON schema. "
+        "**v8.8.2:** the bar-chart legend is now **dynamic** — each chart "
+        "only shows the provenance markers that actually appear among its "
+        "candidates."
     )
 
     col1, col2 = st.columns(2)
@@ -5475,7 +5577,9 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
                 step=0.5,
                 key="rec_bar_leg_fs",
                 help="Size of the legend entries (LLM inference direct / "
-                     "LLM inference fundamental / Heuristic / Best match).",
+                     "LLM inference fundamental / Heuristic / Best match). "
+                     "Only markers that actually appear in the current chart "
+                     "are drawn.",
             )
             ann_offset = st.slider(
                 "Annotation offset (pt)",
@@ -5554,7 +5658,9 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
 
     candidates = [c.value_si / spec["ui_scale"] for c in cands]
     scores = [float(c.score) for c in cands]
-    # v8.8.0: provenance now reflects the candidate's actual derivation route.
+    # v8.8.2: raw method strings go into plot_candidate_scores, which
+    # normalizes them via _norm_provenance().  'fundamental' will map to
+    # itself; legacy 'llm_derived' entries still map to 'fundamental'.
     provenance = [c.method for c in cands]
 
     journals = JournalTemplates.get_journal_styles()
@@ -5695,8 +5801,10 @@ def render_recommender_treemap_pub(bundle: PlasticityRecommendationBundle,
             c_id = f"{p}_{j}_{_pl_hash(c.source_file)[:6]}"
             ids.append(c_id)
             val_str = _pl_fmt(p, c.value_si)
-            # v8.8.0: tag the treemap leaves with their provenance marker.
-            prov_tag = {'llm_derived': ' 🔬VRH',
+            # v8.8.2: tag the treemap leaves with their provenance marker.
+            # 'fundamental' is the canonical key; legacy 'llm_derived'
+            # normalizes to it via _norm_provenance.
+            prov_tag = {'fundamental': ' 🔬VRH',
                         'llm': ' 🦙',
                         'heuristic': ' ⚙️'}.get(_norm_provenance(c.method), '')
             labels.append(f"{val_str}{prov_tag}<br><i>{c.method}</i>"
@@ -6180,7 +6288,10 @@ def render_recommender_visuals_dashboard():
         "Publication-quality visualizations for plasticity parameter "
         "candidates, sources, and distributions. **v8.8.0** adds the VRH "
         "derivation layer — μ candidates derived from extracted C₁₁/C₁₂/C₄₄ "
-        "are drawn with a distinct **●** marker in the bar chart legend."
+        "are drawn with a distinct **●** marker in the bar chart legend. "
+        "**v8.8.2:** that legend is now **dynamic** — a marker only appears "
+        "if at least one candidate on the current chart actually carries "
+        "that provenance (so the VRH marker never shows on a ρ₀ chart)."
     )
 
     chart_type = st.selectbox(
@@ -6259,7 +6370,7 @@ def render_recommender_visuals_dashboard():
                 prior = bundle.prior_suggestion(p)
                 _prov = (_norm_provenance(best.method) if best else '—')
                 _prov_label = {'llm': '🦙 direct',
-                               'llm_derived': '🔬 VRH',
+                               'fundamental': '🔬 VRH',
                                'heuristic': '⚙️ heuristic'}.get(_prov, _prov)
                 rows.append({
                     'Parameter': spec['label'],
@@ -6304,7 +6415,7 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.1:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.2:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🤖 REASONING RECOMMENDER:</span> FAISS + Ollama + LatentMoE + dual-mode prompts.<br>
@@ -6313,6 +6424,7 @@ def main():
     • <span style="color: green;">🚫 DIMENSIONLESS VETO:</span> "μ = 1" reduced-units candidates are excluded from the μ pool.<br>
     • <span style="color: green;">📊 PUBLICATION VISUALS:</span> Radar / Bars / Sankey / Treemap + full styling.<br>
     • <span style="color: green;">🛠️ PROMPT TEMPLATING FIX (v8.8.1):</span> prompt rendering uses <code>&lt;&lt;TOKEN&gt;&gt;</code> replacement instead of <code>str.format()</code> — the JSON schema braces in the prompt can no longer raise <code>IndexError: Replacement index 1 out of range</code>.<br>
+    • <span style="color: green;">🎨 DYNAMIC LEGEND (v8.8.2):</span> the bar-chart legend now renders <em>only</em> the provenance markers that actually appear among the current candidates — so a ρ₀ chart shows ◇ + △, and the ○ VRH marker appears <em>only</em> on charts whose candidates include a code-derived value.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -6351,7 +6463,7 @@ def main():
 
         st.markdown("---")
 
-        with st.expander("🧠 AI Plasticity Recommender v8.8.1", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.8.2", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
