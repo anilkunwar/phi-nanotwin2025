@@ -45,6 +45,8 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata12c-streamlit-blue)](https://nanotwin-evolution-mechanics-nlp12c.streamlit.app/) (LatentMoE visualization customization enhancement, R9 with advanced reasoning with the reasoning  fully functional, use_llm=False to use_llm=True in the prior_learner.learn() call, cache removal function strengthened,contingency plan in prompt for all plasiticty parameters, V5 with added visualization in the plasticity properties recommendation section, Dropdown list of multiple LLMs model for The "Reading" & NER Phase, plasticity parameters intelligent recommender, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
 
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata12d-streamlit-blue)](https://nanotwin-evolution-mechanics-nlp12d.streamlit.app/) (LatentMoE visualization customization enhancement and further upgrades, R9 with advanced reasoning with the reasoning  fully functional, use_llm=False to use_llm=True in the prior_learner.learn() call, cache removal function strengthened,contingency plan in prompt for all plasiticty parameters, V5 with added visualization in the plasticity properties recommendation section, Dropdown list of multiple LLMs model for The "Reading" & NER Phase, plasticity parameters intelligent recommender, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
+
 
 
 
