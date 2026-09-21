@@ -1,6 +1,6 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.0              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                    ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)                ███
@@ -29,6 +29,21 @@
 # ███   · 'c44' / 'c_44' removed from the μ alias list — C44 is NOT a    ███
 # ███     synonym of μ; treating it as one was the aliasing bug that     ███
 # ███     poisoned the μ bucket and hid the VRH route.                   ███
+# ███ FIX (v8.8.1): PROMPT TEMPLATING — IndexError: Replacement index 1  ███
+# ███   out of range for positional args tuple.                          ███
+# ███   · Root cause: _REASONED_INFERENCE_PROMPT (and _STRICT_EXTRACT_   ███
+# ███     PROMPT) were rendered with str.format(...). Because both       ███
+# ███     templates embed a JSON-schema example with literal { } braces  ███
+# ███     (and the Cij extraction refactor added more), every brace is   ███
+# ███     a potential format slot.  A stray {1} anywhere in the template ███
+# ███     fires IndexError before Ollama is ever contacted — which       ███
+# ███     kills the whole recommendation, not just μ/Cij.                ███
+# ███   · Fix: switched both templates to collision-proof <<TOKEN>>      ███
+# ███     replacement.  .format() is no longer used on them.  Braces in  ███
+# ███     the JSON schema are now inert.                                 ███
+# ███   · New helpers: _render_prompt() and _audit_prompt_tokens().      ███
+# ███   · Defensive safe_format() wrapper kept for any other .format()   ███
+# ███     call sites that might be added in future.                      ███
 # ============================================================================
 
 import numpy as np
@@ -67,6 +82,7 @@ import math
 import time
 import threading
 import logging
+import string
 import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -116,6 +132,82 @@ def handle_errors(func):
             logger.error(f"{error_msg}\n{traceback.format_exc()}")
             return None
     return wrapper
+
+
+# ============================================================================
+# v8.8.1: SAFE PROMPT RENDERING HELPERS
+# ============================================================================
+# The plasticity recommender's prompt templates embed a JSON-schema example
+# with literal `{` `}` braces.  Rendering those templates with str.format()
+# is a landmine: every brace is a format slot, and a stray "{1}" anywhere
+# in the prose fires `IndexError: Replacement index 1 out of range for
+# positional args tuple` *before* Ollama is ever contacted — which kills
+# the whole recommendation, not just the μ/Cij path.
+#
+# We therefore use collision-proof <<TOKEN>> replacement for these templates.
+# `<<...>>` cannot appear accidentally because no material-science notation
+# uses it, and — unlike string.Template's `$field` — it does not collide
+# with TeX math delimiters ($...$) that pepper the prompt text.
+# ----------------------------------------------------------------------------
+
+_PROMPT_TOKEN_RE = re.compile(r"<<([A-Z_][A-Z0-9_]*)>>")
+
+
+def _audit_prompt_tokens(name: str, template: str, required: List[str]) -> None:
+    """Fail-fast at import time if a template is missing one of its tokens.
+
+    This catches refactor regressions (e.g. renaming `<<SCHEMA>>` to
+    `<<JSON>>` in the template but not updating the call site) long before
+    Streamlit ever tries to render the prompt.
+    """
+    present = set(_PROMPT_TOKEN_RE.findall(template))
+    missing = [t for t in required if t not in present]
+    if missing:
+        raise RuntimeError(
+            f"Prompt template {name!r} is missing required token(s) {missing}. "
+            f"Present tokens: {sorted(present)}"
+        )
+
+
+def _render_prompt(template: str, **tokens: Any) -> str:
+    """Substitute <<TOKEN>> markers.
+
+    Unlike str.format(), any `{` `}` in the substituted values — and any
+    `{` `}` already in the template, e.g. inside a JSON-schema example —
+    are left completely alone.
+    """
+    out = template
+    for key, value in tokens.items():
+        out = out.replace(f"<<{key}>>", str(value))
+    leftovers = _PROMPT_TOKEN_RE.findall(out)
+    if leftovers:
+        # Do NOT raise — the LLM can still often work with an unresolved
+        # marker — but make the problem visible in the log.
+        logger.warning(
+            "Unsubstituted prompt token(s) after render: %s.  Caller passed: %s",
+            sorted(set(leftovers)), sorted(tokens.keys()),
+        )
+    return out
+
+
+def safe_format(template: str, *args: Any, **kwargs: Any) -> str:
+    """Defensive str.format() wrapper.
+
+    Kept for any *other* .format() call sites (there are none in v8.8.1's
+    recommender path, but this guards against future additions).  If the
+    template has an arity mismatch we degrade gracefully to a naive token
+    replace instead of raising.
+    """
+    try:
+        return template.format(*args, **kwargs)
+    except (IndexError, KeyError, ValueError) as e:
+        logger.error("safe_format failed (%s); falling back to token replace", e)
+        out = template
+        for i, a in enumerate(args):
+            out = out.replace('{%d}' % i, str(a))
+        for k, v in kwargs.items():
+            out = out.replace('{%s}' % k, str(v))
+        return out
 
 
 # ============================================================================
@@ -2344,10 +2436,11 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.0             ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1             ██████
 # ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors       ██████
 # ███  DUAL-MODE PROMPTS + Chain-of-Thought                             ██████
 # ███  v8.8.0: VRH DERIVATION LAYER                                    ██████
+# ███  v8.8.1: PROMPT TEMPLATING FIX (IndexError: Replacement index 1) ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -3130,8 +3223,25 @@ class PlasticityFAISSRetriever:
 
 
 # ============================================================================
-# LLM PROMPTS: TWO MODES (v8.8.0 — elastic-constants slots added)
+# LLM PROMPTS: TWO MODES
 # ============================================================================
+# ============================================================================
+# v8.8.1 FIX — READ THIS BEFORE EDITING THE TEMPLATES BELOW
+# ============================================================================
+# These templates embed a JSON-schema example with literal `{` and `}`
+# characters.  They MUST NOT be rendered with str.format(): every brace in
+# the schema would be treated as a format field, and any stray "{1}" in the
+# prose would raise
+#
+#     IndexError: Replacement index 1 out of range for positional args tuple
+#
+# BEFORE Ollama is ever contacted — killing the entire recommendation, not
+# just μ/Cij.  The templates therefore use collision-proof <<TOKEN>>
+# replacement, applied by `_render_prompt(...)`.  Any new placeholder you
+# add must follow the same <<NAME>> convention, and the corresponding
+# `_audit_prompt_tokens(...)` call below must list it.
+# ============================================================================
+
 _EXTRACT_SCHEMA = (
     '{"param": "rho0|mu|gamma0_dot|srs|sigma0|C11|C12|C44", '
     '"value": <number>, '
@@ -3186,18 +3296,18 @@ Set method="explicit" and confidence >= 0.8.
 Leave the reasoning field as an empty string.
 
 Schema per element:
-  {schema}
+  <<SCHEMA>>
 
 Return ONLY a JSON ARRAY. No markdown, no prose.
 
 TEXT:
-\"\"\"{text}\"\"\"
+\"\"\"<<TEXT>>\"\"\"
 """
 
 _REASONED_INFERENCE_PROMPT = """You are an expert materials-science AI.
 
-GOAL: For the target material "{material}" at T={temp_k} K and strain rate
-{strain_rate} s^-1, return all applicable parameters from BOTH the plastic
+GOAL: For the target material "<<MATERIAL>>" at T=<<TEMP_K>> K and strain rate
+<<STRAIN_RATE>> s^-1, return all applicable parameters from BOTH the plastic
 set and the elastic-constant set below.
 
 ⚠️ The `param` field MUST be EXACTLY one of these eight ASCII strings:
@@ -3249,7 +3359,7 @@ REASONING CHAINS (use these formulas, do NOT just look up a constant):
   mu (T, material, phase state):
     Step 1: Identify material, crystal structure (FCC / BCC / HCP / HEA /
             amorphous), and phase from the text. If the text is silent,
-            use the target material "{material}". If still unclear, default
+            use the target material "<<MATERIAL>>". If still unclear, default
             to Cu.
 
     Step 2: If the text supplies single-crystal elastic constants
@@ -3331,7 +3441,7 @@ REASONING CHAINS (use these formulas, do NOT just look up a constant):
     gamma0_dot is the REFERENCE shear strain rate appearing in the
     constitutive flow law. It is NOT the applied strain rate.
 
-    The applied strain rate given above ({strain_rate} s^-1) is a CONTEXT
+    The applied strain rate given above (<<STRAIN_RATE>> s^-1) is a CONTEXT
     VARIABLE for reasoning purposes only. Even if you decide gamma0_dot
     is numerically equal to it, you MUST still emit a separate JSON
     object with param="gamma0_dot" and its value.
@@ -3376,12 +3486,31 @@ CRITICAL RULES:
   confidence=0.3. Do NOT emit C11/C12/C44 in that case.
 
 Return ONLY a JSON ARRAY. Schema per element:
-  {schema}
+  <<SCHEMA>>
 No markdown, no comments, no prose outside JSON.
 
 TEXT:
-\"\"\"{text}\"\"\"
+\"\"\"<<TEXT>>\"\"\"
 """
+
+# ----------------------------------------------------------------------------
+# v8.8.1: import-time audit of the prompt templates.
+# ----------------------------------------------------------------------------
+# If a future refactor renames a token in the template but not in the call
+# site (or vice versa), we want the failure to happen at import time — not
+# mid-Streamlit-render, where it manifests as an opaque "Recommendation
+# failed" for every parameter.
+# ----------------------------------------------------------------------------
+_audit_prompt_tokens(
+    '_STRICT_EXTRACT_PROMPT',
+    _STRICT_EXTRACT_PROMPT,
+    required=['SCHEMA', 'TEXT'],
+)
+_audit_prompt_tokens(
+    '_REASONED_INFERENCE_PROMPT',
+    _REASONED_INFERENCE_PROMPT,
+    required=['SCHEMA', 'TEXT', 'MATERIAL', 'TEMP_K', 'STRAIN_RATE'],
+)
 
 
 # ----------------------------------------------------------------------------
@@ -3429,14 +3558,35 @@ class PlasticityParameterExtractor:
 
         llm_out: List[Dict[str, Any]] = []
         if use_llm and self.client is not None:
+            # ------------------------------------------------------------------
+            # v8.8.1 FIX: token replacement, NOT .format().
+            #
+            # The templates embed a JSON schema with literal { } braces.
+            # Calling .format() on them treats every brace as a format field
+            # and — because the prose also contains a stray numeric "{1}"
+            # in the Cij instructions — raises
+            #     IndexError: Replacement index 1 out of range for positional
+            #                 args tuple
+            # which kills the whole recommendation.  _render_prompt() uses
+            # <<TOKEN>> markers, which cannot collide with any brace in the
+            # schema or with the TeX math delimiters $...$ elsewhere in the
+            # prompt.
+            # ------------------------------------------------------------------
             if mode == "strict_extract":
-                prompt = _STRICT_EXTRACT_PROMPT.format(
-                    schema=_EXTRACT_SCHEMA, text=text[:3500])
+                prompt = _render_prompt(
+                    _STRICT_EXTRACT_PROMPT,
+                    SCHEMA=_EXTRACT_SCHEMA,
+                    TEXT=text[:3500],
+                )
             else:
-                prompt = _REASONED_INFERENCE_PROMPT.format(
-                    schema=_REASONED_INFERENCE_SCHEMA,
-                    material=material, temp_k=temp_k, strain_rate=strain_rate,
-                    text=text[:3500])
+                prompt = _render_prompt(
+                    _REASONED_INFERENCE_PROMPT,
+                    SCHEMA=_REASONED_INFERENCE_SCHEMA,
+                    MATERIAL=str(material),
+                    TEMP_K=str(temp_k),
+                    STRAIN_RATE=str(strain_rate),
+                    TEXT=text[:3500],
+                )
             raw = self.client.generate_json(prompt, debug=debug_llm)
             logger.debug("Ollama raw (%s): %s", mode, raw)
             llm_out = self._validate(raw)
@@ -4600,14 +4750,16 @@ def render_plasticity_recommender_sidebar(
     default_strain_rate: float = 1e-3,
     ollama_model: str = "qwen2.5:7b",
 ):
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.0")
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.1")
     st.caption(
         "FAISS + SentenceTransformer retrieval · Ollama NER · LatentMoE scoring · "
         "dual-mode prompts · param-alias canonicalization · "
         "**v8.8.0: VRH derivation layer** — the LLM extracts C₁₁/C₁₂/C₄₄ "
         "verbatim and pure Python derives μ (Voigt/Reuss/Hill). "
         "Provenance is now three-tier: **direct** (🦙) vs **fundamental** "
-        "(🔬 VRH) vs **heuristic** (⚙️)."
+        "(🔬 VRH) vs **heuristic** (⚙️). "
+        "**v8.8.1:** prompt rendering switched to `<<TOKEN>>` replacement — "
+        "no more `IndexError` from braces inside the JSON schema."
     )
 
     col1, col2 = st.columns(2)
@@ -6152,7 +6304,7 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.0:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.1:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🤖 REASONING RECOMMENDER:</span> FAISS + Ollama + LatentMoE + dual-mode prompts.<br>
@@ -6160,6 +6312,7 @@ def main():
     • <span style="color: green;">🎯 PROVENANCE:</span> three-tier — direct (🦙) · fundamental/VRH (🔬) · heuristic (⚙️) — with distinct marker shapes in the bar chart.<br>
     • <span style="color: green;">🚫 DIMENSIONLESS VETO:</span> "μ = 1" reduced-units candidates are excluded from the μ pool.<br>
     • <span style="color: green;">📊 PUBLICATION VISUALS:</span> Radar / Bars / Sankey / Treemap + full styling.<br>
+    • <span style="color: green;">🛠️ PROMPT TEMPLATING FIX (v8.8.1):</span> prompt rendering uses <code>&lt;&lt;TOKEN&gt;&gt;</code> replacement instead of <code>str.format()</code> — the JSON schema braces in the prompt can no longer raise <code>IndexError: Replacement index 1 out of range</code>.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -6198,7 +6351,7 @@ def main():
 
         st.markdown("---")
 
-        with st.expander("🧠 AI Plasticity Recommender v8.8.0", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.8.1", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
