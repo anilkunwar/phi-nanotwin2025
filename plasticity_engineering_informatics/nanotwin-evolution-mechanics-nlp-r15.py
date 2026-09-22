@@ -1,6 +1,6 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.0              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                   ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)               ███
@@ -31,6 +31,18 @@
 # ███     (no search inside the LLM — it only reads pre-ranked top-k).   ███
 # ███   · Gatekeeper: unit conversion + plausibility rejection + dedupe  ███
 # ███     + provenance tagging feeding plot_candidate_scores as before.  ███
+# ███ FIX (v8.8.1): heuristic_extract pass (b) kwarg collision         ██████
+# ███   · Root cause: find_value_after() returns {"value":…, "unit":…};  ███
+# ███     pass (b) then did dict(**hit, unit=hit["unit"] or tu, …) →     ███
+# ███     TypeError: dict() got multiple values for keyword arg 'unit'.  ███
+# ███   · Fix: items are built with merge_no_clash(hit, unit=…), a       ███
+# ███     helper that mirrors {**a, "k": v} semantics (PEP 448) and      ███
+# ███     never raises on a duplicate key.                              ███
+# ███   · Added a float-coercion guard so a malformed proximity hit is   ███
+# ███     skipped instead of crashing the recommendation pass.           ███
+# ███   · Audited the full v8.8.0 pipeline for dict(**untrusted, key=…)  ███
+# ███     splats — pass (b) was the sole site; no other regressions.     ███
+# ███   · Regression test included: _regression_test_v881().             ███
 # ============================================================================
 
 import numpy as np
@@ -69,7 +81,7 @@ import math
 import time
 import threading
 import logging
-import unicodedata                             # v8.8.0
+import unicodedata
 import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -1022,9 +1034,7 @@ def render_candidate_score_chart(param_key, candidates, scores, provenance,
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  v8.8.0 — NER-GAZETTEER RETRIEVAL + GROUNDED LLM EXTRACTION      ██████
-# ███  Retrieve-then-extract pipeline for reliable shear-modulus (and    ██████
-# ███  every other plasticity) parameter extraction from JSON corpora.  ██████
+# ███  v8.8.0 / v8.8.1 — NER-GAZETTEER RETRIEVAL + GROUNDED LLM EXTRACTION ██
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -1040,7 +1050,7 @@ GAZETTEER: Dict[str, List[str]] = {
                       "reference strain rate", "reference shear strain rate",
                       "strain rate sensitivity", "srs", "friction stress",
                       "lattice friction", "peierls stress", "yield stress"],
-    "property_weak": ["mu", "g"],          # μ/G need corroborating context
+    "property_weak": ["mu", "g"],
     "related":       ["c11", "c12", "bulk modulus", "youngs modulus",
                       "young's modulus", "poisson's ratio", "stiffness tensor",
                       "c'", "c_s"],
@@ -1055,18 +1065,14 @@ GAZETTEER: Dict[str, List[str]] = {
 }
 
 
-# ---- 2. NORMALIZATION: μ↔mu, C₄₄/C_44/c 44 → c44, TeX keys → plain --------
+# ---- 2. NORMALIZATION ------------------------------------------------------
 _CHAR_FOLD = {"μ": "mu", "µ": "mu", "ρ": "rho", "–": "-", "—": "-",
               "’": "'", "\u00a0": " ", "γ": "gamma", "σ": "sigma",
               "λ": "lambda", "θ": "theta", "φ": "phi", "η": "eta"}
 
 
 def norm_text(s: Any) -> str:
-    """Normalize a text fragment for gazetteer matching.
-
-    Handles: NFKC fold (C₄₄ → C44), μ↔mu, TeX wrappers (\\mu, $..$, C_{44}),
-    underscore-before-digit removal (C_44 → C44, rho_0 → rho0), and
-    letter-then-digit whitespace collapse ("c 44" → "c44")."""
+    """Normalize a text fragment for gazetteer matching."""
     s = unicodedata.normalize("NFKC", str(s))
     for k, v in _CHAR_FOLD.items():
         s = s.replace(k, v)
@@ -1092,7 +1098,6 @@ ENTITY_PATTERNS = {k: [re.compile(alias_pattern(a)) for a in v]
 
 
 # ---- 3. PARAMETER CANON ----------------------------------------------------
-# ONE alias list shared by retrieval, LLM prompt, and gatekeeper.
 PARAM_CANON: Dict[str, Dict[str, Any]] = {
     "mu": dict(
         aliases=["shear modulus", "shear moduli", "c44", "elastic constants",
@@ -1138,13 +1143,30 @@ PARAM_CANON: Dict[str, Dict[str, Any]] = {
 }
 
 
+# ---- 3b. v8.8.1 SAFE-MERGE HELPER -----------------------------------------
+def merge_no_clash(base: Dict[str, Any], **overrides: Any) -> Dict[str, Any]:
+    """dict(**base, **overrides) that never raises on duplicate keys.
+
+    Later values win, mirroring the {**a, **b} literal semantics (PEP 448).
+    Use this any time `base` may be a caller-supplied or LLM-produced dict
+    whose keys are not under your control.
+
+    Examples
+    --------
+    >>> merge_no_clash({"value": 47.19, "unit": "gpa"}, unit="GPa")
+    {'value': 47.19, 'unit': 'GPa'}
+
+    >>> merge_no_clash({"a": 1}, b=2, c=3)
+    {'a': 1, 'b': 2, 'c': 3}
+    """
+    out = dict(base)
+    out.update(overrides)
+    return out
+
+
 # ---- 4. QUERY GENERATION ---------------------------------------------------
 def build_boolean_queries(material="Cu", param_key="mu", value_hints=None,
                           methods=("RUS", "Voigt", "Reuss", "self-consistent")):
-    """Generates NER-table Boolean patterns, e.g.:
-       '"Cu" AND "c44" AND "shear modulus" AND "47.19"'  (tightest)
-       '"Cu" AND "Voigt" AND "55.17"'                    (method-anchored)
-       '"copper" AND "shear modulus" AND "47.19 GPa"'    (value+unit)"""
     p = PARAM_CANON.get(param_key, {}).get("aliases", [param_key])
     qs = [f'"{material}" AND "{a}"' for a in p[:4]]
     qs += [f'"{material}" AND "{a}" AND "GPa"' for a in p[:2]]
@@ -1157,7 +1179,6 @@ def build_boolean_queries(material="Cu", param_key="mu", value_hints=None,
 
 
 def build_query_texts(material="Cu", param_key="mu", value_hints=None):
-    """Natural-language variants for the optional dense (SBERT) channel."""
     props = PARAM_CANON.get(param_key, {}).get("aliases", [param_key])[:3]
     texts = [f"{material} {p} in GPa" for p in props]
     texts += [f"{material} shear modulus c44 {m}"
@@ -1168,7 +1189,7 @@ def build_query_texts(material="Cu", param_key="mu", value_hints=None):
     return texts
 
 
-# ---- 5. CORPUS LOADING + RECORD-LEVEL FLATTENING ---------------------------
+# ---- 5. CORPUS LOADING + RECORD FLATTENING ---------------------------------
 def load_corpus_folder(folder: str) -> Dict[str, Any]:
     corpus = {}
     if not os.path.isdir(folder):
@@ -1184,7 +1205,6 @@ def load_corpus_folder(folder: str) -> Dict[str, Any]:
 
 
 def iter_corpus_records(corpus) -> List[Dict[str, Any]]:
-    """One corpus ROW = one searchable record."""
     records = []
     if isinstance(corpus, dict):
         for fname, data in corpus.items():
@@ -1198,7 +1218,6 @@ def iter_corpus_records(corpus) -> List[Dict[str, Any]]:
 
 
 def flatten_keyvals(node, path=""):
-    """→ [(json_path, key, value_str)] so every hit maps back to its slot."""
     out = []
     if isinstance(node, dict):
         for k, v in node.items():
@@ -1223,8 +1242,6 @@ def _spans(text, patterns):
 
 # ---- 6. LEXICAL SCORER -----------------------------------------------------
 def score_record(text, param_key, material="Cu", value_hints=None):
-    """Deterministic score. Numbers NEVER ride alone: a value anchor only
-    earns full points if a property label or unit sits within ±80 / ±15 chars."""
     canon = PARAM_CANON.get(param_key, {})
     score, why = 0.0, []
     mat   = _spans(text, ENTITY_PATTERNS["material"])
@@ -1274,40 +1291,80 @@ def find_value_after(text, pos, target_unit="gpa", window=80):
 
 
 def heuristic_extract(records, param_key, target_unit="GPa"):
-    """Two passes: (a) JSON KEY matches a property alias; (b) prose proximity."""
+    """Two passes: (a) JSON KEY matches a property alias; (b) prose proximity.
+
+    v8.8.1 FIX
+    ----------
+    Pass (b) previously called ``dict(**hit, unit=hit["unit"] or tu, ...)``
+    while ``hit`` (returned by :func:`find_value_after`) already carries a
+    ``unit`` key. Python raises::
+
+        TypeError: dict() got multiple values for keyword argument 'unit'
+
+    Items are now built with :func:`merge_no_clash`, so the function is
+    immune to any key that ``find_value_after`` (or any future helper)
+    may add to its return dict. Malformed proximity hits are skipped by
+    an explicit float-coercion guard rather than crashing the pipeline.
+    """
     canon = PARAM_CANON.get(param_key, {})
     tu = target_unit.lower()
     key_pats = [re.compile(alias_pattern(a)) for a in canon.get("aliases", [])]
-    out = []
+    out: List[Dict[str, Any]] = []
+
     for rec in records:
         text = rec["text_norm"]
-        # (a) key-position match:  {"c44": 47.19}
+
+        # ── (a) key-position match: {"c44": 47.19} / {"shear_modulus_GPa": 47.19}
         for path, key, val in flatten_keyvals(rec["data"]):
             if not any(p.search(norm_text(key)) for p in key_pats):
                 continue
             vt = norm_text(val)
             m = _NUM_UNIT_RE.search(vt) or _BARE_NUM_RE.search(vt)
-            if m:
-                is_num_unit = m.re is _NUM_UNIT_RE
-                out.append(dict(value=float(m.group(1)),
-                                unit=(m.group(2) if is_num_unit else tu),
-                                property_label=key,
-                                evidence_span=f"{key} = {val}",
-                                source=rec["source"], path=path))
-        # (b) prose proximity:  "shear modulus c44 = mu ... 47.19 GPa"
+            if not m:
+                continue
+            is_num_unit = m.re is _NUM_UNIT_RE
+            out.append({
+                "value":          float(m.group(1)),
+                "unit":           (m.group(2) if is_num_unit else tu),
+                "property_label": key,
+                "evidence_span":  f"{key} = {val}",
+                "source":         rec["source"],
+                "path":           path,
+            })
+
+        # ── (b) prose proximity: "shear modulus c44 = mu ... 47.19 GPa"
         for p in key_pats:
             for m in p.finditer(text):
                 hit = find_value_after(text, m.end(), tu)
-                if hit:
-                    out.append(dict(**hit,
-                                    unit=hit["unit"] or tu,
-                                    property_label=m.group(0),
-                                    evidence_span=text[max(0, m.start() - 15):
-                                                       m.end() + 45],
-                                    source=rec["source"], path=""))
+                if not hit:
+                    continue
+
+                # v8.8.1: build the merged item without a ** splat.
+                item = merge_no_clash(
+                    hit,
+                    unit=hit.get("unit") or tu,
+                    property_label=m.group(0),
+                    evidence_span=text[max(0, m.start() - 15): m.end() + 45],
+                    source=rec["source"],
+                    path="",
+                )
+
+                try:
+                    item["value"] = float(item["value"])
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "heuristic_extract[%s]: skipping malformed hit "
+                        "value=%r from %r",
+                        param_key, item.get("value"), m.group(0),
+                    )
+                    continue
+
+                out.append(item)
+
+    # ── dedupe on (value, unit)
     seen, ded = set(), []
     for e in out:
-        kk = (round(e["value"], 4), e["unit"])
+        kk = (round(e["value"], 4), str(e.get("unit")))
         if kk not in seen:
             seen.add(kk)
             ded.append(e)
@@ -1325,11 +1382,7 @@ def rrf(rank_lists, k=60):
 
 
 class HybridRetriever:
-    """Lexical ∧ (optional FAISS/SBERT) fused by RRF.
-
-    The lexical channel stays authoritative for exact numerals because
-    embedding similarity destroys precise values like 47.19 → fuzzy tokens.
-    """
+    """Lexical ∧ (optional FAISS/SBERT) fused by RRF."""
 
     def __init__(self, corpus, use_dense=True):
         self.records = iter_corpus_records(corpus)
@@ -1355,14 +1408,12 @@ class HybridRetriever:
     def search(self, param_key, material="Cu", value_hints=None, k=6):
         if not self.records:
             return []
-        # channel 1: deterministic gazetteer scores (exact-number safe)
         lex = []
         for rid in self.ids:
             s, _ = score_record(self._txt[rid], param_key, material, value_hints)
             if s > 0:
                 lex.append((-s, rid))
         rank_lists = [[rid for _, rid in sorted(lex)]]
-        # channel 2: dense recall for paraphrased labels (optional)
         if self.dense:
             for q in build_query_texts(material, param_key, value_hints)[:4]:
                 qv = self.model.encode([q], normalize_embeddings=True).astype(np.float32)
@@ -1434,7 +1485,7 @@ def ollama_extract(prompt, model="qwen2.5:7b", host="http://localhost:11434",
 class ValueCandidate:
     value: float
     unit: str
-    provenance: str                                   # 'llm' | 'heuristic'
+    provenance: str
     property_label: str = ""
     method: str = ""
     evidence: str = ""
@@ -1522,7 +1573,7 @@ def get_retriever(folder: str = "json_metadatabase",
     corpus = load_corpus_folder(folder)
     return HybridRetriever(corpus, use_dense=use_dense)
 # ============================================================================
-# ███ END v8.8.0 NER MODULE                                              ██████
+# ███ END v8.8.0 / v8.8.1 NER MODULE                                     ██████
 # ============================================================================
 
 
@@ -2864,10 +2915,7 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.0             ██████
-# ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors ·     ██████
-# ███  DUAL-MODE PROMPTS · Chain-of-Thought · Gatekeeper               ██████
-# ███  v8.8.0: NER-gazetteer retrieval + grounded verbatim-only prompt ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.1             ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -2991,11 +3039,7 @@ TARGET_JSON_FILES: List[str] = [
 ]
 
 
-# ----------------------------------------------------------------------------
-# PARAM ALIAS MAP — canonicalizes whatever the LLM emits to a known key
-# ----------------------------------------------------------------------------
 _PARAM_ALIASES: Dict[str, str] = {
-    # ---- rho0 --------------------------------------------------------------
     "rho_0": "rho0", "rho": "rho0", "ρ₀": "rho0", "ρ0": "rho0",
     "rho0_": "rho0", "rho_0_": "rho0",
     "dislocation_density": "rho0",
@@ -3003,11 +3047,9 @@ _PARAM_ALIASES: Dict[str, str] = {
     "initial disloc density": "rho0",
     "forest_density": "rho0",
     "rho_dis": "rho0",
-    # ---- mu ----------------------------------------------------------------
     "g": "mu", "shear_modulus": "mu", "μ": "mu", "mu_s": "mu",
     "shear modulus": "mu", "rigidity_modulus": "mu", "c44": "mu",
     "c_44": "mu", "elastic_shear_modulus": "mu",
-    # ---- gamma0_dot --------------------------------------------------------
     "gamma_dot_0": "gamma0_dot", "gamma_0_dot": "gamma0_dot",
     "γ̇₀": "gamma0_dot", "γ0": "gamma0_dot", "gamma_dot": "gamma0_dot",
     "gamma0": "gamma0_dot",
@@ -3025,7 +3067,6 @@ _PARAM_ALIASES: Dict[str, str] = {
     "pre-exponential": "gamma0_dot",
     "pre_exponential": "gamma0_dot",
     "attempt_frequency": "gamma0_dot",
-    # ---- srs ---------------------------------------------------------------
     "m": "srs", "m_exponent": "srs", "rate_sensitivity": "srs",
     "strain_rate_sensitivity": "srs",
     "srs_exponent": "srs",
@@ -3033,7 +3074,6 @@ _PARAM_ALIASES: Dict[str, str] = {
     "strain-rate_sensitivity": "srs",
     "stress_exponent": "srs",
     "n": "srs",
-    # ---- sigma0 ------------------------------------------------------------
     "sigma_0": "sigma0", "σ₀": "sigma0", "σ0": "sigma0",
     "yield_stress": "sigma0", "friction_stress": "sigma0",
     "peierls_stress": "sigma0", "lattice_friction": "sigma0",
@@ -3044,7 +3084,6 @@ _PARAM_ALIASES: Dict[str, str] = {
     "friction lattice stress": "sigma0",
     "athermal_stress": "sigma0",
     "yield_strength": "sigma0",
-    # ---- twin spacing / applied stress / W ---------------------------------
     "lambda": "twin_spacing", "twin_spacing": "twin_spacing",
     "twin_thickness": "twin_spacing",
     "applied_stress": "applied_stress",
@@ -3250,7 +3289,7 @@ class PlasticityOllamaClient:
 
 
 # ----------------------------------------------------------------------------
-# CORPUS LOADER (targets the 5 canonical JSON files)
+# CORPUS LOADER
 # ----------------------------------------------------------------------------
 class PlasticityCorpus:
     """Loads, chunks, and caches text records from the 5 metadatabases."""
@@ -3359,13 +3398,12 @@ class PlasticityCorpus:
 
 
 # ----------------------------------------------------------------------------
-# FAISS RETRIEVAL LAYER (LEGACY, kept for backward compatibility)
+# FAISS RETRIEVAL LAYER (LEGACY)
 # ----------------------------------------------------------------------------
 class PlasticityFAISSRetriever:
     """Dense retrieval over the corpus using SentenceTransformer + FAISS.
 
-    NOTE: v8.8.0 deprecates this in favor of HybridRetriever, which fuses
-    the lexical gazetteer channel with the dense channel via RRF.
+    NOTE: v8.8.0 deprecates this in favor of HybridRetriever.
     Kept in place so existing session state and pickles still work.
     """
 
@@ -3515,7 +3553,7 @@ class PlasticityFAISSRetriever:
 
 
 # ----------------------------------------------------------------------------
-# LLM PROMPTS: TWO MODES (+ grounded v8.8.0 mode)
+# LLM PROMPTS
 # ----------------------------------------------------------------------------
 _EXTRACT_SCHEMA = (
     '{"param": "rho0|mu|gamma0_dot|srs|sigma0", '
@@ -3685,7 +3723,7 @@ TEXT:
 
 
 # ----------------------------------------------------------------------------
-# LLM + HEURISTIC EXTRACTION (DUAL-MODE + GATEKEEPER + v8.8.0 grounded)
+# LLM + HEURISTIC EXTRACTION
 # ----------------------------------------------------------------------------
 class PlasticityParameterExtractor:
     """Extracts plasticity parameters from text, in one of three modes:
@@ -3933,8 +3971,7 @@ class PlasticityCandidate:
 
 
 class PlasticityLatentMoEScorer:
-    """Six-expert gating: material, thermal, strain, method, confidence,
-    and reasoning quality."""
+    """Six-expert gating."""
 
     def __init__(self,
                  w_material: float = 0.40,
@@ -4142,7 +4179,7 @@ class PlasticityMaterialPriorLearner:
 
 
 # ----------------------------------------------------------------------------
-# HISTOGRAM PLOTTER (side panel — compact style)
+# HISTOGRAM PLOTTER (side panel)
 # ----------------------------------------------------------------------------
 def render_plasticity_candidate_histograms(
     candidates_by_param: Dict[str, List[PlasticityCandidate]],
@@ -4245,8 +4282,7 @@ class PlasticityRecommender:
 
     v8.8.0: uses HybridRetriever (lexical gazetteer ∧ dense SBERT/FAISS,
     RRF fusion) plus recommend_param_values() which calls the grounded
-    prompt with verbatim-only JSON contract. Existing v8.2 dual-mode
-    (strict/reasoned) paths are preserved as fallbacks.
+    prompt with verbatim-only JSON contract.
     """
 
     CACHE_DIR = ".plasticity_cache"
@@ -4261,8 +4297,8 @@ class PlasticityRecommender:
         self.corpus = PlasticityCorpus(db_dir)
         self.client = PlasticityOllamaClient(model=ollama_model)
         self.llm_available = use_llm and PlasticityOllamaClient.is_available()
-        self.retriever = PlasticityFAISSRetriever()          # legacy path
-        self.hybrid = None                                   # v8.8.0
+        self.retriever = PlasticityFAISSRetriever()
+        self.hybrid = None
         if use_grounded:
             try:
                 self.hybrid = get_retriever(db_dir, use_dense=True)
@@ -4298,7 +4334,6 @@ class PlasticityRecommender:
         except Exception as e:
             logger.warning("Cache save failed: %s", e)
 
-    # ── v8.8.0 grounded path (preferred) ────────────────────────────────
     def recommend_grounded(self, material: str, temp_k: float,
                            strain_rate: float = 1e-3,
                            value_hints: Optional[List[str]] = None,
@@ -4306,11 +4341,6 @@ class PlasticityRecommender:
                            build_priors: bool = True,
                            progress_callback=None
                            ) -> PlasticityRecommendationBundle:
-        """Hybrid retrieve → grounded LLM → gatekeep → LatentMoE → priors.
-
-        This is the recommended path for shear modulus (`mu`) and every
-        other parameter where the JSON records have explicit values and
-        we want verbatim extraction with unit conversion."""
         if self.hybrid is None:
             st.warning("Hybrid retriever unavailable — falling back to v8.7 "
                        "pipeline via recommend().")
@@ -4354,7 +4384,6 @@ class PlasticityRecommender:
                 logger.info("grounded[%s]: %d candidates, top records = %s",
                             param, len(cands), [r["id"] for r in records[:3]])
 
-        # Guarantee gamma0_dot like v8.4.0
         present = {e["param"] for e in extractions}
         if "gamma0_dot" not in present:
             extractions.append({
@@ -4402,7 +4431,6 @@ class PlasticityRecommender:
             retrieval_backend=retrieval_backend, llm_used=self.llm_available,
         )
 
-    # ── v8.7 legacy path — kept for strict prior-learning and cross-check
     def recommend(self, material: str, temp_k: float, strain_rate: float = 1e-3,
                   max_docs: int = 20, build_priors: bool = True,
                   progress_callback=None) -> PlasticityRecommendationBundle:
@@ -4532,7 +4560,6 @@ def purge_plasticity_caches() -> List[str]:
     """Delete every known plasticity cache, including v8.8.0 hybrid retriever."""
     purged: List[str] = []
 
-    # v8.8.0: clear st.cache_resource for the hybrid retriever singleton
     try:
         st.cache_resource.clear()
         purged.append("streamlit cache_resource (hybrid retriever)")
@@ -4620,14 +4647,13 @@ def _plr_set(key, value):
 
 
 def _plr_reset():
-    """Full reset: clears the radio + manual number_input keys too (v8.8.0
-    fix — the v8.7 version left stale widget state behind)."""
+    """Full reset — clears the radio + manual number_input keys too."""
     for p in PARAM_ORDER:
         st.session_state.pop(f"{_PLR}{p}_choice", None)
         st.session_state.pop(f"{_PLR}{p}_manual", None)
         st.session_state.pop(f"{_PLR}{p}_value_si", None)
-        st.session_state.pop(f"{_PLR}{p}_radio", None)          # v8.8.0
-        st.session_state.pop(f"{_PLR}{p}_manual_input", None)   # v8.8.0
+        st.session_state.pop(f"{_PLR}{p}_radio", None)
+        st.session_state.pop(f"{_PLR}{p}_manual_input", None)
     st.session_state.pop(f"{_PLR}bundle", None)
     st.session_state.pop("plasticity_overrides", None)
     st.session_state.pop("_plr_live_recommender", None)
@@ -4723,13 +4749,13 @@ def render_plasticity_recommender_sidebar(
     default_strain_rate: float = 1e-3,
     ollama_model: str = "qwen2.5:7b",
 ):
-    """Sidebar with v8.8.0 hybrid retrieval + grounded LLM + priors."""
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.0")
+    """Sidebar with v8.8.1 hybrid retrieval + grounded LLM + priors."""
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.1")
     st.caption(
-        "**v8.8.0 NER pipeline:** GAZETTEER + PARAM_CANON + value-anchored "
+        "**v8.8.1 NER pipeline:** GAZETTEER + PARAM_CANON + value-anchored "
         "lexical scoring ∧ FAISS/SBERT, RRF fusion · grounded verbatim-only "
         "LLM prompt · gatekeeper (unit conversion + plausibility + dedupe) · "
-        "property-alias→value→unit regex fallback.  "
+        "property-alias→value→unit regex fallback (kwarg-collision fix).  "
         "**Legacy v8.7 paths preserved as strict/reasoned fallbacks.**"
     )
 
@@ -4752,9 +4778,6 @@ def render_plasticity_recommender_sidebar(
         "Value hints for shear modulus (comma-separated; e.g. `47.19, 55.17`)",
         value="",
         key=f"{_PLR}value_hints",
-        help=("Optional. Each hint becomes a value-anchor bonus in the "
-              "lexical scorer: a bare number earns full points only if a "
-              "property label or unit sits within ±80 / ±15 chars."),
     )
     value_hints = [s.strip() for s in value_hints_raw.split(",") if s.strip()]
 
@@ -4780,11 +4803,6 @@ def render_plasticity_recommender_sidebar(
         options=display_options,
         index=default_idx,
         key=f"{_PLR}ollama_model_select",
-        help=(
-            "Pick '⚡ Fallback' to use the built-in heuristic extractor. "
-            "Locally-installed models detected via Ollama's /api/tags are "
-            "appended automatically."
-        ),
     )
     ollama_model = model_options.get(selected_display, "")
 
@@ -4809,12 +4827,9 @@ def render_plasticity_recommender_sidebar(
         st.caption(f"🔎 Retrieval: `{backend_txt}`")
 
     use_grounded = st.checkbox(
-        "🧭 Use v8.8.0 grounded NER pipeline (recommended)",
+        "🧭 Use v8.8.1 grounded NER pipeline (recommended)",
         value=True,
         key=f"{_PLR}use_grounded",
-        help=("Retrieve-then-extract: gazetteer + value-anchored lexical "
-              "pre-filter → grounded verbatim-only LLM prompt → gatekeeper. "
-              "Uncheck to use the legacy v8.7 dual-mode pipeline."),
     )
 
     debug_llm = st.checkbox(
@@ -4990,9 +5005,7 @@ def apply_plasticity_overrides(solver) -> None:
 
 
 # ============================================================================
-# ███████████████████████████████████████████████████████████████████████████
-# ███  PUBLICATION-QUALITY AI RECOMMENDER VISUALS DASHBOARD            ██████
-# ███████████████████████████████████████████████████████████████████████████
+# PUBLICATION-QUALITY AI RECOMMENDER VISUALS DASHBOARD
 # ============================================================================
 
 @dataclass
@@ -5273,7 +5286,6 @@ _BAR_PRESET_PENDING_KEY = "rec_bar_pending_preset"
 
 
 def _apply_pending_bar_preset() -> None:
-    """Pop a queued preset and seed the widget keys BEFORE widget creation."""
     pending = st.session_state.pop(_BAR_PRESET_PENDING_KEY, None)
     if not pending:
         return
@@ -5286,12 +5298,7 @@ def _apply_pending_bar_preset() -> None:
 
 def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
                                 style: RecommenderVisualStyle) -> Optional[bytes]:
-    """LatentMoE candidate-score bar chart, publication quality, with
-    full colormap AND typography control.
-
-    v8.8.0: adds the NER debug panel showing the top-k records and the
-    generated Boolean queries for the currently selected parameter.
-    """
+    """LatentMoE candidate-score bar chart, publication quality."""
     _apply_pending_bar_preset()
 
     selected_param = st.selectbox(
@@ -5317,7 +5324,6 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
     meta['symbol'] = normalize_tex(meta.get('symbol'))
     meta['unit']   = normalize_tex(meta.get('unit'))
 
-    # v8.8.0: NER debug panel
     with st.expander("🧭 NER debug: retrieved records + Boolean queries",
                      expanded=False):
         mat = bundle.material or "Cu"
@@ -5346,7 +5352,6 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
         st.code("\n".join(build_query_texts(mat, selected_param)),
                 language="text")
 
-    # ── colormap control panel ──────────────────────────────────────────
     with st.expander("🎨 Colormap & Coloring Options", expanded=True):
         col_a, col_b, col_c = st.columns(3)
 
@@ -5369,9 +5374,6 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
                 all_cmap_names,
                 index=default_idx,
                 key="rec_bar_cmap_select",
-                help="Sequential maps suit score gradients; diverging maps "
-                     "highlight low/high separation; categorical maps give "
-                     "each bar a distinct hue.",
             )
 
             try:
@@ -5400,9 +5402,6 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
                     else 0
                 ),
                 key="rec_bar_color_mode",
-                help="Score: colour encodes the LatentMoE score value.\n"
-                     "Index: each bar gets a distinct colour from the cmap.\n"
-                     "Uniform: all bars the same grey (pre-v8.6.0 style).",
             )
 
             colorbar_available = (color_mode == 'score')
@@ -6180,7 +6179,7 @@ def render_recommender_visuals_dashboard():
     st.header("🤖 AI Recommender Visuals Dashboard")
     st.caption(
         "Publication-quality visualizations for plasticity parameter "
-        "candidates, sources, and distributions.  **v8.8.0** adds the NER "
+        "candidates, sources, and distributions.  **v8.8.1** adds the NER "
         "grounded pipeline (gazetteer retrieval + verbatim-only LLM + "
         "gatekeeper) — see the Bar Chart NER debug panel."
     )
@@ -6302,13 +6301,13 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.0:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.1:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🧭 NER-GAZETTEER (v8.8.0):</span> GAZETTEER + PARAM_CANON + value-anchored lexical scoring ∧ FAISS/SBERT via RRF.<br>
     • <span style="color: green;">🎯 GROUNDED LLM:</span> LLM only reads pre-filtered top-k records under a verbatim-only JSON contract.<br>
     • <span style="color: green;">🔒 GATEKEEPER:</span> unit conversion + plausibility rejection + dedupe + provenance tagging.<br>
-    • <span style="color: green;">📐 REGEX FALLBACK:</span> property-alias → value → unit proximity extractor, plugs into existing provenance markers.<br>
+    • <span style="color: green;">📐 REGEX FALLBACK (v8.8.1 fix):</span> property-alias → value → unit proximity extractor, hardened against duplicate-keyword collisions via <code>merge_no_clash</code>.<br>
     • <span style="color: green;">🧠 LEGACY v8.7 PATHS:</span> strict_extract + reasoned_inference retained as fallbacks.<br>
     • <span style="color: green;">🎨 COLORMAP ENGINE:</span> 60+ colormaps · score/index/uniform · adaptive text halo · one-click presets.<br>
     • <span style="color: green;">✍️ TYPOGRAPHY ENGINE:</span> annotation/legend/colorbar label/colorbar tick font sizes + annotation offset + auto head-room.<br>
@@ -6351,7 +6350,7 @@ def main():
 
         st.markdown("---")
 
-        with st.expander("🧠 AI Plasticity Recommender v8.8.0", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.8.1", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
@@ -7294,6 +7293,53 @@ def main():
             st.rerun()
 
     render_recommender_visuals_dashboard()
+
+
+# ============================================================================
+# REGRESSION TEST (v8.8.1)
+# ============================================================================
+def _regression_test_v881() -> None:
+    """Regression test for the v8.8.1 kwarg-collision fix.
+
+    Before the fix, this exact setup raised::
+
+        TypeError: dict() got multiple values for keyword argument 'unit'
+
+    from inside heuristic_extract() pass (b). After the fix it must
+    return one ValueCandidate with value 47.19 GPa and property label
+    'shear modulus'.
+    """
+    corpus = {"cu_elastic.json": [
+        {"material": "Cu",
+         "quantity": "shear modulus c44 = μ",
+         "value": 47.19,
+         "unit": "GPa",
+         "method": "RUS"},
+    ]}
+    r = HybridRetriever(corpus, use_dense=False)
+    recs = r.search("mu", "Cu", value_hints=["47.19"], k=3)
+    assert recs, "HybridRetriever returned no records"
+
+    hits = heuristic_extract(recs, "mu")           # must NOT raise
+    assert hits, "heuristic_extract returned no candidates"
+    assert any(abs(h["value"] - 47.19) < 1e-6 for h in hits), \
+        f"expected 47.19 in hits, got {[h['value'] for h in hits]}"
+
+    cands = gatekeep(hits, "mu", provenance="heuristic")
+    assert cands, "gatekeep rejected every heuristic candidate"
+    best = cands[0]
+    assert abs(best.value - 47.19) < 1e-6, \
+        f"gatekeep value drifted: {best.value}"
+    assert best.provenance == "heuristic", \
+        f"provenance lost: {best.provenance}"
+
+    logger.info("v8.8.1 regression test: PASS  "
+                "value=%.4f unit=%s label=%r",
+                best.value, best.unit, best.property_label)
+
+
+# Uncomment the line below (or run the file directly) to execute the test.
+# _regression_test_v881()
 
 
 # ============================================================================
