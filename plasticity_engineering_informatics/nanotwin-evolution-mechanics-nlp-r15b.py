@@ -1,7 +1,6 @@
-
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.3              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.4              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                   ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)               ███
@@ -49,6 +48,29 @@
 # ███   · Fourth provenance glyph ▼ (marker='v') for derived candidates    ███
 # ███   · PROVENANCE_MARKERS['derived'] + _norm_provenance 'deriv' branch   ███
 # ███   · Sidebar captions + UI prov_tag map updated for derivation methods ███
+# ███ FIX (v8.8.4): 'ValueCandidate' object has no attribute 'reasoning'  ███
+# ███   · The v8.2.0 chain-of-thought / derivation-reasoning string was    ███
+# ███     computed inside the Tiers and inside the derived bridge, but      ███
+# ███     NEVER persisted onto the ValueCandidate dataclass, so the first   ███
+# ███     `c.reasoning` access inside recommend_grounded() raised           ███
+# ███     AttributeError (caught by @handle_errors → silent failure of     ███
+# ███     the entire recommendation).                                      ███
+# ███   · `reasoning: str = ""` appended as the final defaulted dataclass  ███
+# ███     field so all existing positional / kwarg constructions keep       ███
+# ███     working.                                                          ███
+# ███   · New `_default_reasoning(c)` helper near `_norm_provenance` for    ███
+# ███     provenance-true fallbacks when a candidate lacks an explicit      ███
+# ███     reasoning string (e.g. Tier-1, Tier-2, or a stale pickle).        ███
+# ███   · `gatekeep()` now forwards `it['reasoning']` into the candidate    ███
+# ███     so Tier-1 / Tier-2 / Tier-3 all carry their chain verbatim.       ███
+# ███   · `derive_sigma0_and_tau_p()` now actually PASSES its locally-      ███
+# ███     computed `reasoning` chain into each ValueCandidate it builds     ███
+# ███     (previously computed-and-discarded).                              ███
+# ███   · `recommend_grounded()` uses `getattr(c, "reasoning", "") or       ███
+# ███     _default_reasoning(c)` — defensive against object.__new__,        ███
+# ███     dataclasses.replace() on pre-v8.8.4 instances, and un-pickled     ███
+# ███     caches from older sessions.                                       ███
+# ███   · `ValueCandidate.to_display()` now emits the reasoning string.     ███
 # ============================================================================
 
 import numpy as np
@@ -683,6 +705,34 @@ def _norm_provenance(p):
     return 'heuristic'
 
 
+def _default_reasoning(c) -> str:
+    """v8.8.4 — provenance-true fallback reasoning string for any candidate
+    whose explicit `reasoning` field is empty or missing.
+
+    Used by `recommend_grounded()` to guarantee a non-empty chain-of-thought
+    even for:
+      · Tier-1 grounded candidates where the LLM contract forbids prose,
+      · Tier-2 regex candidates that carry only a matched span,
+      · stale pickles from pre-v8.8.4 sessions that predate the field,
+      · any future construction path (object.__new__, dataclasses.replace
+        on an older instance) that bypasses the dataclass __init__.
+    """
+    prov = _norm_provenance(getattr(c, "provenance", ""))
+    if prov == "llm":
+        return ("Tier-1 grounded LLM extraction — verbatim span, "
+                "corpus-anchored, unit-coerced by the gatekeeper.")
+    if prov == "heuristic":
+        return ("Tier-2 deterministic regex — sci-notation scanner + "
+                "param-aware unit tokens; no LLM involved.")
+    if prov == "llm_prior":
+        return ("Tier-3 LLM prior inference — no verbatim corpus evidence; "
+                "confidence capped at 0.5, bounded by PARAM_CANON.")
+    if prov == "derived":
+        return ("Derived via side-note cluster bridge — "
+                "Hall–Petch / Taylor / Peierls–Nabarro.")
+    return ""
+
+
 def sci_tex(value, unit=None, decimals=1):
     r"""sci_tex(2.5e13, 'm^{-2}') -> r'$2.5\times10^{13}\,\mathrm{m^{-2}}$'"""
     v = float(value)
@@ -1052,7 +1102,7 @@ def render_candidate_score_chart(param_key, candidates, scores, provenance,
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  v8.8.0 / v8.8.1 / v8.8.2 / v8.8.3 — NER PIPELINE + CASCADE + DERIVED██
+# ███  v8.8.0 / v8.8.1 / v8.8.2 / v8.8.3 / v8.8.4 — NER PIPELINE + CASCADE ███
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -1637,7 +1687,13 @@ def derive_sigma0_and_tau_p(
     cands_by_param: Dict[str, List["ValueCandidate"]],
     bundle_material: str,
 ) -> List["ValueCandidate"]:
-    """Compute σ₀ and τ_P from the extracted side-note cluster."""
+    """Compute σ₀ and τ_P from the extracted side-note cluster.
+
+    v8.8.4: the locally-computed `reasoning` chain is now actually PASSED
+    into every ValueCandidate built here.  Previously it was computed,
+    used as a local variable, and silently discarded — which is why the
+    downstream `c.reasoning` access in recommend_grounded() blew up.
+    """
     out: List["ValueCandidate"] = []
 
     def best(param_key: str) -> Optional["ValueCandidate"]:
@@ -1734,6 +1790,8 @@ def derive_sigma0_and_tau_p(
                     evidence=evidence,
                     source=f"side-note-cluster[{length_label}]",
                     confidence=0.45,
+                    # v8.8.4 — the chain is now persisted, not discarded.
+                    reasoning=reasoning,
                 ))
 
     # ─────────────────────────────────────────────────────────────
@@ -1770,6 +1828,8 @@ def derive_sigma0_and_tau_p(
             evidence=evidence,
             source="side-note-cluster[sigma0/M]",
             confidence=0.35,
+            # v8.8.4 — persisted.
+            reasoning=reasoning,
         ))
 
     # ─────────────────────────────────────────────────────────────
@@ -1817,6 +1877,8 @@ def derive_sigma0_and_tau_p(
                     evidence=evidence,
                     source="side-note-cluster[P-N formula]",
                     confidence=conf,
+                    # v8.8.4 — persisted.
+                    reasoning=reasoning,
                 ))
 
     return out
@@ -1985,7 +2047,7 @@ def ollama_extract(prompt, model="qwen2.5:7b", host="http://localhost:11434",
     return r.json().get("response", "")
 
 
-# ---- 10. GATEKEEPER (v8.8.3: adds conf_cap for 'derived') ------------------
+# ---- 10. GATEKEEPER (v8.8.4: also forwards `reasoning`) --------------------
 @dataclass
 class ValueCandidate:
     value: float
@@ -1996,8 +2058,26 @@ class ValueCandidate:
     evidence: str = ""
     source: str = ""
     confidence: float = 1.0
+    # ────────────────────────────────────────────────────────────────────
+    # v8.8.4 — chain-of-thought / provenance note.
+    #
+    # The v8.2.0 release introduced CoT prompting for the LLM tiers and a
+    # step-by-step derivation trace for the v8.8.3 bridge, but the string
+    # was never persisted onto the candidate dataclass.  Downstream code
+    # (`recommend_grounded`, the reasoning expander in
+    # `_plr_render_parameter_selector`) accessed `c.reasoning` directly
+    # and raised AttributeError.
+    #
+    # Declared as the FINAL field with a default so that every existing
+    # positional or keyword construction — including the ones inside
+    # `gatekeep`, `derive_sigma0_and_tau_p`, the regression tests, and any
+    # un-pickled pre-v8.8.4 caches that survive a warm restart — continues
+    # to work unmodified.
+    # ────────────────────────────────────────────────────────────────────
+    reasoning: str = ""
 
     def to_display(self) -> Dict[str, Any]:
+        # v8.8.4 — reasoning is now surfaced in the UI audit table too.
         return {
             "value": round(self.value, 6),
             "unit": self.unit,
@@ -2007,6 +2087,9 @@ class ValueCandidate:
             "source": self.source[:80],
             "confidence": round(self.confidence, 3),
             "evidence": self.evidence[:140],
+            "reasoning": (self.reasoning[:200] + "…"
+                          if len(self.reasoning) > 200
+                          else self.reasoning),
         }
 
 
@@ -2018,6 +2101,11 @@ def gatekeep(items, param_key, provenance="llm", conf_cap=None):
 
     v8.8.3: conf_cap also defaults to 0.5 for 'derived' provenance, keeping
     bridge output visibly distinguishable from verbatim-grounded candidates.
+
+    v8.8.4: every candidate produced here now carries a `reasoning` string
+    (either the one already present on the source dict, or — if the caller
+    did not supply one — the empty string, which `_default_reasoning` will
+    later substitute based on the candidate's provenance).
     """
     canon = PARAM_CANON.get(param_key, {})
     (lo, hi) = canon.get("plausible", (float("-inf"), float("inf")))
@@ -2059,6 +2147,8 @@ def gatekeep(items, param_key, provenance="llm", conf_cap=None):
                          or it.get("inference_basis") or ""),
             source=str(it.get("source", "")),
             confidence=min(float(it.get("confidence", 1.0)), conf_cap),
+            # v8.8.4 — forward the caller's reasoning if any.
+            reasoning=str(it.get("reasoning") or ""),
         ))
     return sorted(out, key=lambda c: -c.confidence)
 
@@ -2138,7 +2228,7 @@ def get_retriever(folder: str = "json_metadatabase",
     corpus = load_corpus_folder(folder)
     return HybridRetriever(corpus, use_dense=use_dense)
 # ============================================================================
-# ███ END v8.8.0 / v8.8.1 / v8.8.2 / v8.8.3 NER MODULE                     ██
+# ███ END v8.8.0 / v8.8.1 / v8.8.2 / v8.8.3 / v8.8.4 NER MODULE            ██
 # ============================================================================
 
 
@@ -3466,7 +3556,7 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.3             ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.4             ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -4110,7 +4200,7 @@ class PlasticityOllamaClient:
 # CORPUS LOADER
 # ----------------------------------------------------------------------------
 class PlasticityCorpus:
-    _CACHE_VERSION = "v883"
+    _CACHE_VERSION = "v884"
 
     def __init__(self, db_dir: str = "json_metadatabase", max_chars: int = 4000):
         self.db_dir = db_dir
@@ -5070,6 +5160,10 @@ class PlasticityRecommender:
 
     v8.8.3: adds the derived-quantity bridge that computes σ₀ and τ_P from
     the side-note cluster (Hall–Petch, Taylor, Peierls–Nabarro).
+
+    v8.8.4: fixes the AttributeError at bundle-assembly time by forcing
+    every `_provenance` dict to carry a non-empty `reasoning` field via
+    `getattr(c, "reasoning", "") or _default_reasoning(c)`.
     """
 
     CACHE_DIR = ".plasticity_cache"
@@ -5125,6 +5219,7 @@ class PlasticityRecommender:
 
     # ------------------------------------------------------------------
     # v8.8.3: primary entry point — three-tier cascade + derived bridge
+    # v8.8.4: bullet-proof `reasoning` access via getattr + fallback
     # ------------------------------------------------------------------
     def recommend_grounded(self, material: str, temp_k: float,
                            strain_rate: float = 1e-3,
@@ -5178,7 +5273,13 @@ class PlasticityRecommender:
                     "method": method,
                     "confidence": c.confidence,
                     "evidence": c.evidence,
-                    "reasoning": "",
+                    # v8.8.4 — defensive read; `getattr` protects against
+                    # stale pickles / object.__new__ / dataclasses.replace
+                    # on pre-v8.8.4 instances, and `_default_reasoning`
+                    # back-fills a provenance-true note when the explicit
+                    # field is empty (which is the normal case for Tier-1
+                    # and Tier-2 candidates whose contract forbids prose).
+                    "reasoning": getattr(c, "reasoning", "") or _default_reasoning(c),
                     "_source_file": c.source,
                     "_source_title": c.property_label,
                     "_provenance": c.provenance,
@@ -5224,7 +5325,12 @@ class PlasticityRecommender:
                 "method":         c.method,
                 "confidence":     c.confidence,
                 "evidence":       c.evidence,
-                "reasoning":      c.reasoning,
+                # v8.8.4 — same defensive read as above.  In practice
+                # `derive_sigma0_and_tau_p` now populates `reasoning`
+                # directly on each ValueCandidate it builds, so this
+                # `_default_reasoning` branch is only hit if a downstream
+                # user constructs a derived candidate manually.
+                "reasoning":      getattr(c, "reasoning", "") or _default_reasoning(c),
                 "_source_file":   c.source,
                 "_source_title":  c.property_label,
                 "_provenance":    "derived",
@@ -5611,6 +5717,9 @@ def _plr_render_parameter_selector(param: str,
             st.markdown("**📚 Evidence snippet**")
             with st.container():
                 st.code(chosen.evidence, language="text")
+        # v8.8.4 — the reasoning string is now guaranteed to exist on the
+        # PlasticityCandidate dataclass (v8.7 field), so this expander
+        # renders reliably for every tier.
         if chosen.reasoning:
             with st.expander("🧠 LLM reasoning chain", expanded=False):
                 st.markdown(chosen.reasoning)
@@ -5625,10 +5734,18 @@ def render_plasticity_recommender_sidebar(
     default_strain_rate: float = 1e-3,
     ollama_model: str = "qwen2.5:7b",
 ):
-    """Sidebar with v8.8.3 derived-σ₀/τ_P bridge + hybrid retrieval + priors."""
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.3")
+    """Sidebar with v8.8.4 derived-σ₀/τ_P bridge + hybrid retrieval + priors."""
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.4")
     st.caption(
-        "**v8.8.3 friction/lattice stress support:** σ₀ and τ_P are now "
+        "**v8.8.4 reasoning provenance fix:** every `ValueCandidate` now "
+        "carries a non-empty `reasoning` string, so the bundle-assembly "
+        "step in `recommend_grounded()` no longer raises AttributeError. "
+        "Tier-1 and Tier-2 candidates inherit a provenance-true note via "
+        "`_default_reasoning`; derived candidates carry their explicit "
+        "Hall–Petch / Taylor / Peierls–Nabarro chain."
+    )
+    st.caption(
+        "**v8.8.3 friction/lattice stress support:** σ₀ and τ_P are "
         "first-class NER targets. The bridge auto-derives them from the "
         "side-note cluster (d, λ, σ_y, k_y, G, ν, b, M, w) using Hall–Petch "
         "(σ₀ = σ_y − k_y·d⁻¹ᐟ²), Taylor cross-conversion (τ_P ≈ σ₀/M), and the "
@@ -7102,9 +7219,9 @@ def render_recommender_visuals_dashboard():
     st.header("🤖 AI Recommender Visuals Dashboard")
     st.caption(
         "Publication-quality visualizations for plasticity parameter "
-        "candidates, sources, and distributions.  **v8.8.3** adds the "
-        "derived-σ₀/τ_P bridge — see the sidebar diagnostics table for the "
-        "provenance breakdown per parameter."
+        "candidates, sources, and distributions.  **v8.8.4** fixes the "
+        "reasoning-provenance crash in `recommend_grounded()`; every "
+        "candidate now carries a non-empty reasoning string."
     )
 
     chart_type = st.selectbox(
@@ -7223,7 +7340,7 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.3:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.4:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🧭 NER-GAZETTEER:</span> GAZETTEER + PARAM_CANON + value-anchored lexical scoring ∧ FAISS/SBERT via RRF.<br>
@@ -7233,6 +7350,7 @@ def main():
     • <span style="color: green;">🔧 v8.8.3 DERIVED BRIDGE:</span> σ₀ and τ_P auto-derived from side-note cluster via <b>Hall–Petch</b>, <b>Taylor</b>, and <b>Peierls–Nabarro</b> formulas — ▼ marker in bar chart.<br>
     • <span style="color: green;">🔒 GATEKEEPER:</span> unit conversion + plausibility + dedupe + confidence-cap + 4-way provenance tagging.<br>
     • <span style="color: green;">📊 COVERAGE METRIC:</span> x/N counter + per-parameter cascade diagnostics table.<br>
+    • <span style="color: green;">🩹 v8.8.4 REASONING FIX:</span> <code>ValueCandidate.reasoning</code> is now a declared dataclass field; every tier carries a provenance-true reasoning string, so <code>recommend_grounded()</code> no longer raises <code>AttributeError</code>.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -7271,7 +7389,7 @@ def main():
 
         st.markdown("---")
 
-        with st.expander("🧠 AI Plasticity Recommender v8.8.3", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.8.4", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
@@ -8322,7 +8440,7 @@ def main():
 
 
 # ============================================================================
-# REGRESSION TESTS (v8.8.1 / v8.8.2 / v8.8.3)
+# REGRESSION TESTS (v8.8.1 / v8.8.2 / v8.8.3 / v8.8.4)
 # ============================================================================
 def _regression_test_v881() -> None:
     """Regression test for the v8.8.1 kwarg-collision fix."""
@@ -8349,6 +8467,9 @@ def _regression_test_v881() -> None:
         f"gatekeep value drifted: {best.value}"
     assert best.provenance == "heuristic", \
         f"provenance lost: {best.provenance}"
+    # v8.8.4 — reasoning is a declared field on ValueCandidate.
+    assert hasattr(best, "reasoning"), \
+        "ValueCandidate is missing the v8.8.4 `reasoning` field"
 
     logger.info("v8.8.1 regression test: PASS  "
                 "value=%.4f unit=%s label=%r",
@@ -8428,12 +8549,17 @@ def _regression_test_v883() -> None:
     assert abs(sigma0.value - 2.0e7) < 5e6, \
         f"Hall–Petch σ₀ drifted: got {sigma0.value/1e6:.2f} MPa"
     assert sigma0.provenance == "derived"
+    # v8.8.4 — the bridge now persists the step-by-step chain.
+    assert sigma0.reasoning and "Step 1" in sigma0.reasoning, \
+        "derived σ₀ candidate is missing its reasoning chain"
 
     tau_p_pn = next((c for c in derived
                      if c.method == "peierls_nabarro_formula"), None)
     assert tau_p_pn is not None, "P–N formula path did not fire"
     assert 1e4 < tau_p_pn.value < 1e7, \
         f"P–N τ_P out of expected range: {tau_p_pn.value/1e6:.4g} MPa"
+    assert tau_p_pn.reasoning and "Step 1" in tau_p_pn.reasoning, \
+        "derived τ_P (P–N) candidate is missing its reasoning chain"
 
     tau_p_taylor = next((c for c in derived
                          if c.method == "taylor_factor_cross_conversion"),
@@ -8441,6 +8567,8 @@ def _regression_test_v883() -> None:
     assert tau_p_taylor is not None, "Taylor cross-conversion did not fire"
     assert abs(tau_p_taylor.value - 6.5e6) < 1.5e6, \
         f"Taylor τ_P drifted: {tau_p_taylor.value/1e6:.3f} MPa"
+    assert tau_p_taylor.reasoning and "Step 1" in tau_p_taylor.reasoning, \
+        "derived τ_P (Taylor) candidate is missing its reasoning chain"
 
     assert _norm_provenance("derived") == "derived"
     assert _norm_provenance("hall_petch_intercept") == "derived"
@@ -8468,10 +8596,88 @@ def _regression_test_v883() -> None:
     )
 
 
+def _regression_test_v884() -> None:
+    """v8.8.4 — reasoning-field regression test.
+
+    Reproduces the exact failure mode diagnosed in the crash report:
+    the AttributeError raised when `recommend_grounded()` reads
+    `c.reasoning` on a ValueCandidate that predates the field.
+    """
+    # 1) Field must be declared, defaulted, and append-only.
+    import dataclasses as _dc
+    fields = [f.name for f in _dc.fields(ValueCandidate)]
+    assert "reasoning" in fields, \
+        "ValueCandidate is missing the `reasoning` dataclass field"
+    assert fields[-1] == "reasoning", \
+        "`reasoning` must be the LAST field so positional construction " \
+        "remains backward-compatible"
+
+    # 2) Default construction works without the kwarg.
+    c_default = ValueCandidate(value=1.0, unit="Pa", provenance="heuristic")
+    assert c_default.reasoning == "", \
+        "Default `reasoning` must be the empty string"
+
+    # 3) Explicit construction preserves the supplied chain.
+    c_explicit = ValueCandidate(
+        value=1.0, unit="Pa", provenance="derived",
+        reasoning="Step 1: test chain.",
+    )
+    assert c_explicit.reasoning == "Step 1: test chain."
+
+    # 4) The defensive read used by `recommend_grounded` must NEVER raise,
+    #    even on an object constructed with `object.__new__` (which skips
+    #    __init__ and therefore skips the field defaults).
+    stale = object.__new__(ValueCandidate)
+    stale.value = 1.0
+    stale.unit = "Pa"
+    stale.provenance = "llm_prior"
+    stale.property_label = ""
+    stale.method = ""
+    stale.evidence = ""
+    stale.source = ""
+    stale.confidence = 0.5
+    # Deliberately do NOT set stale.reasoning — simulate a pre-v8.8.4 pickle.
+    got = getattr(stale, "reasoning", "") or _default_reasoning(stale)
+    assert got and "prior" in got.lower(), \
+        f"_default_reasoning did not substitute for stale object: {got!r}"
+
+    # 5) `_default_reasoning` returns a distinct, provenance-true string
+    #    for each of the four canonical classes.
+    for prov, needle in (("llm", "Tier-1"),
+                         ("heuristic", "Tier-2"),
+                         ("llm_prior", "Tier-3"),
+                         ("derived", "side-note")):
+        stub = ValueCandidate(value=1.0, unit="", provenance=prov)
+        note = _default_reasoning(stub)
+        assert note and needle in note, \
+            f"_default_reasoning mismatch for {prov!r}: {note!r}"
+
+    # 6) `gatekeep` forwards `reasoning` from the input dict.
+    hits = gatekeep(
+        [{"value": 48.0, "unit": "GPa", "confidence": 0.9,
+          "property_label": "shear modulus", "source": "t",
+          "reasoning": "custom Tier-1 note"}],
+        "mu", provenance="llm",
+    )
+    assert hits and hits[0].reasoning == "custom Tier-1 note", \
+        "gatekeep failed to forward caller-supplied reasoning"
+
+    # 7) `to_display()` exposes the reasoning string.
+    disp = c_explicit.to_display()
+    assert "reasoning" in disp and disp["reasoning"].startswith("Step 1")
+
+    logger.info(
+        "v8.8.4 regression test: PASS  "
+        "field declared+defaulted ✓  stale-object read ✓  "
+        "per-tier fallback ✓  gatekeep forwarding ✓  to_display ✓"
+    )
+
+
 # Uncomment any of the lines below to run the regression tests at import.
 # _regression_test_v881()
 # _regression_test_v882()
 # _regression_test_v883()
+# _regression_test_v884()
 
 
 # ============================================================================
