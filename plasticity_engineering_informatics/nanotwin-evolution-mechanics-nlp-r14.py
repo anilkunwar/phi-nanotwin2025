@@ -1,6 +1,6 @@
 # ============================================================================
 # ███ ENHANCED NANOTWINNED Cu PHASE-FIELD SIMULATOR (PURE FFT SPECTRAL) ███
-# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.2              ███
+# ███ + PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.3              ███
 # ███ PUBLICATION-QUALITY VISUALS DASHBOARD                             ███
 # ███ STREAMLIT NESTED-EXPANDER FIX APPLIED (v8.0.1)                    ███
 # ███ FULL CACHE PURGE ON "FORCE RELOAD CORPUS" (v8.1.1)                ███
@@ -61,6 +61,27 @@
 # ███   · New thin helper _compute_vrh_shear_modulus(C11, C12, C44) ->   ███
 # ███     float, alias over derive_shear_modulus_vrh()['G_H'], for       ███
 # ███     call-site symmetry.                                            ███
+# ███ UPGRADE (v8.8.3): NEURO-SYMBOLIC ARCHITECTURE                     ███
+# ███   · The recommender is now explicitly split into a NEURO side      ███
+# ███     (LLM does Named Entity Recognition only) and a SYMBOLIC side   ███
+# ███     (deterministic physics engine does ALL arithmetic).            ███
+# ███   · New ElasticityPhysicsEngine class is the canonical, unit-      ███
+# ███     testable VRH implementation.  derive_shear_modulus_vrh() is    ███
+# ███     retained only as a thin backward-compat alias.                 ███
+# ███   · New dedicated _STRICT_CIJ_EXTRACTION_PROMPT — a second LLM     ███
+# ███     pass whose ONLY job is to extract C11/C12/C44 verbatim.  It    ███
+# ███     explicitly FORBIDS arithmetic ("DO NOT calculate μ", "DO NOT   ███
+# ███     average"), so the LLM cannot hallucinate a derived quantity.   ███
+# ███   · extract() is now TWO-PASS: reasoned-inference for the five     ███
+# ███     plastic params + strict-Cij for the elastic constants.  Pass-2 ███
+# ███     Cij OVERRIDES pass-1 Cij (pass 2 is more focused and never     ███
+# ███     pollutes the plastic schema).                                  ███
+# ███   · New NeuroSymbolicOrchestrator class cleanly bridges the two    ███
+# ███     sides.  augment_candidates_with_derived_mu() is retained as a  ███
+# ███     thin shim that delegates to the orchestrator.                  ███
+# ███   · UI: any candidate whose method is 'fundamental' now shows an   ███
+# ███     explicit "🔬 Derived via Voigt-Reuss-Hill averaging" banner    ███
+# ███     plus the full three-step derivation chain.                     ███
 # ============================================================================
 
 import numpy as np
@@ -210,7 +231,7 @@ def _render_prompt(template: str, **tokens: Any) -> str:
 def safe_format(template: str, *args: Any, **kwargs: Any) -> str:
     """Defensive str.format() wrapper.
 
-    Kept for any *other* .format() call sites (there are none in v8.8.1's
+    Kept for any *other* .format() call sites (there are none in v8.8.3's
     recommender path, but this guards against future additions).  If the
     template has an arity mismatch we degrade gracefully to a naive token
     replace instead of raising.
@@ -781,7 +802,7 @@ def _norm_provenance(p: Any) -> str:
         'fundamental', 'derived', 'llm_derived' (legacy),
         'vrh', 'voigt', 'reuss', 'hill',
         'cij', 'c11', 'c12', 'c44',
-        'elastic_constants'
+        'elastic_constants', 'fundamental_vrh'
     Recognised direct extractions → 'llm':
         'llm', 'inferred', 'model', 'ai', 'explicit', 'direct'
     Everything else → 'heuristic'.
@@ -2510,12 +2531,13 @@ class ParameterSweep:
 
 # ============================================================================
 # ███████████████████████████████████████████████████████████████████████████
-# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.2             ██████
+# ███  PLASTICITY PARAMETER INTELLIGENT RECOMMENDER v8.8.3             ██████
 # ███  FAISS Retrieval · Ollama LLM · LatentMoE · Learned Priors       ██████
 # ███  DUAL-MODE PROMPTS + Chain-of-Thought                             ██████
 # ███  v8.8.0: VRH DERIVATION LAYER                                    ██████
 # ███  v8.8.1: PROMPT TEMPLATING FIX (IndexError: Replacement index 1) ██████
 # ███  v8.8.2: DYNAMIC PROVENANCE LEGEND + 'fundamental' KEY           ██████
+# ███  v8.8.3: NEURO-SYMBOLIC ARCHITECTURE                              ██████
 # ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
 
@@ -2696,7 +2718,9 @@ _PARAM_ALIASES: Dict[str, str] = {
     "rho_dis": "rho0",
     # ---- mu ----------------------------------------------------------------
     # NOTE: 'c44' and 'c_44' are DELIBERATELY ABSENT here.  They are handled
-    # by _FUNDAMENTAL_ALIASES and never map to μ.
+    # by _FUNDAMENTAL_ALIASES and never map to μ.  This is the ontological
+    # fix from the neuro-symbolic architecture: C44 is an *input* to μ
+    # (via Voigt-Reuss-Hill averaging), not a synonym of μ.
     "g": "mu", "shear_modulus": "mu", "μ": "mu", "mu_s": "mu",
     "shear modulus": "mu", "rigidity_modulus": "mu",
     "elastic_shear_modulus": "mu",
@@ -2871,12 +2895,199 @@ def _pl_fmt(param: str, si_value: float) -> str:
 
 
 # ============================================================================
-# v8.8.0: VRH DERIVATION LAYER (pure Python, no LLM arithmetic)
+# ███████████████████████████████████████████████████████████████████████████
+# ███  v8.8.3: NEURO-SYMBOLIC PHYSICS ENGINE                            ██████
+# ███                                                                   ██████
+# ███  This module contains NO AI.  It is pure, testable, deterministic ██████
+# ███  physics.  Its sole job is to convert single-crystal elastic       ██████
+# ███  constants (C11, C12, C44) into macroscopic polycrystalline        ██████
+# ███  aggregate properties (μ, K) via Voigt-Reuss-Hill averaging.      ██████
+# ███                                                                   ██████
+# ███  The philosophical point of the neuro-symbolic split:              ██████
+# ███    · The LLM's job is Named Entity Recognition.  It finds C11,     ██████
+# ███      C12, C44 in unstructured text and returns them VERBATIM.      ██████
+# ███    · The physics engine's job is arithmetic.  It applies the       ██████
+# ███      mathematically exact VRH formulas.                            ██████
+# ███                                                                   ██████
+# ███  References:                                                       ██████
+# ███    · Voigt, W. (1928) Lehrbuch der Kristallphysik                 ██████
+# ███    · Reuss, A. (1929) Z. Angew. Math. Mech. 9, 49                 ██████
+# ███    · Hill, R. (1952) Proc. Phys. Soc. A 65, 349                    ██████
+# ███    · Zener, C. (1948) Elasticity and Anelasticity of Metals       ██████
+# ███████████████████████████████████████████████████████████████████████████
 # ============================================================================
-# The LLM finds and transcribes C11/C12/C44 VERBATIM.  This layer does every
-# bit of the arithmetic.  That division is the point of the 'fundamental'
-# provenance label: the LLM's contribution is evidence discovery; the
-# derivation is reproducible, citable code.
+
+class ElasticityPhysicsEngine:
+    """Deterministic physics engine for computing macroscopic elastic
+    properties from single-crystal elastic constants (Cij).
+
+    Every method is a pure function of its scalar arguments.  No state.
+    No LLM.  No heuristics.  Every formula is standard solid-state physics.
+
+    Units convention: all inputs and outputs are in **GPa** unless stated
+    otherwise.  The caller is responsible for GPa ↔ Pa conversion at the
+    boundary of the plastic-solver domain (which is SI).
+
+    This class is the SYMBOLIC half of the neuro-symbolic architecture.
+    The LLM (the NEURO half) must NEVER be asked to compute anything that
+    this class computes.  That's the whole point.
+    """
+
+    @staticmethod
+    def compute_vrh_shear_modulus(C11: float,
+                                  C12: float,
+                                  C44: float) -> Dict[str, float]:
+        """Compute the Voigt-Reuss-Hill averaged shear modulus for a cubic
+        crystal.
+
+        Physics:
+          · Voigt bound assumes uniform strain  → upper bound on G.
+          · Reuss bound assumes uniform stress  → lower bound on G.
+          · Hill average is the arithmetic mean → canonical isotropic
+            polycrystal value used in plasticity constitutive laws.
+
+        For cubic symmetry:
+          G_V = (C11 − C12 + 3·C44) / 5
+          G_R = 5·(C11 − C12)·C44 / (4·C44 + 3·(C11 − C12))
+          G_H = (G_V + G_R) / 2
+
+        All inputs in GPa; all outputs in GPa.
+
+        Returns a dict with:
+          · C_prime   — tetragonal shear modulus C' = (C11 − C12)/2
+          · G_V       — Voigt upper bound
+          · G_R       — Reuss lower bound
+          · G_H       — Hill average (USE THIS for the constitutive law)
+          · B         — Bulk modulus  K = (C11 + 2·C12)/3
+          · zener_A   — Zener anisotropy A = 2·C44 / (C11 − C12)
+        """
+        C11 = float(C11); C12 = float(C12); C44 = float(C44)
+
+        # Tetragonal shear modulus (a.k.a. C')
+        C_prime = 0.5 * (C11 - C12)
+
+        # Voigt shear modulus (iso-strain, upper bound)
+        G_V = (C11 - C12 + 3.0 * C44) / 5.0
+
+        # Reuss shear modulus (iso-stress, lower bound).  The denominators
+        # are guarded against zero/negative values so the formula cannot
+        # blow up even if the caller passes a marginal Cij triple.
+        denom_reuss = (4.0 * max(C44, 1e-12)
+                       + 3.0 * max(C11 - C12, 1e-12))
+        G_R = 5.0 * (C11 - C12) * C44 / denom_reuss
+
+        # Hill average — canonical value
+        G_H = 0.5 * (G_V + G_R)
+
+        # Bulk modulus K (from the trace of the stiffness tensor)
+        B = (C11 + 2.0 * C12) / 3.0
+
+        # Zener anisotropy ratio (1 = isotropic)
+        zener_A = 2.0 * C44 / max(C11 - C12, 1e-12)
+
+        return {
+            'C_prime': C_prime,
+            'G_V':     G_V,
+            'G_R':     G_R,
+            'G_H':     G_H,
+            'B':       B,
+            'zener_A': zener_A,
+        }
+
+    @staticmethod
+    def compute_bulk_modulus(C11: float, C12: float) -> float:
+        """Computes the bulk modulus K for a cubic crystal.
+
+        K = (C11 + 2·C12) / 3
+
+        Note: for cubic symmetry this is exact (not a bound) because the
+        bulk modulus of a cubic crystal is isotropic by symmetry.
+        """
+        return (float(C11) + 2.0 * float(C12)) / 3.0
+
+    @staticmethod
+    def compute_poisson_ratio(B: float, G_H: float) -> float:
+        """ν = (3B − 2G) / (2·(3B + G))  — isotropic elastic relation."""
+        num = 3.0 * float(B) - 2.0 * float(G_H)
+        den = 2.0 * (3.0 * float(B) + float(G_H))
+        return num / max(abs(den), 1e-12)
+
+    @staticmethod
+    def compute_youngs_modulus(G_H: float, nu: float) -> float:
+        """E = 2·G·(1 + ν)  — isotropic elastic relation."""
+        return 2.0 * float(G_H) * (1.0 + float(nu))
+
+    @staticmethod
+    def plausible_cubic_cij(C11: Optional[float],
+                            C12: Optional[float],
+                            C44: Optional[float]) -> bool:
+        """Physical-bounds gate for cubic-metallic Cij (in GPa).
+
+        Rejects:
+          · values outside [5, 600] GPa (metals only)
+          · C11 − C12 <= 0  (violates Born stability)
+          · C44 <= 0        (violates Born stability)
+          · Zener A outside [0.3, 12] (rules out garbage / unit errors)
+
+        This is the LAST line of defence before the physics engine runs.
+        """
+        if any(v is None or not (5.0 < float(v) < 600.0)
+               for v in (C11, C12, C44)):
+            return False
+        if C11 - C12 <= 0 or C44 <= 0:
+            return False
+        A = 2.0 * C44 / max(C11 - C12, 1e-12)
+        return 0.3 <= A <= 12.0
+
+
+# ----------------------------------------------------------------------------
+# Backward-compatibility aliases.
+#
+# v8.8.0/v8.8.2 exposed the VRH math as standalone functions.  Those names
+# are kept as thin delegates into ElasticityPhysicsEngine so that any
+# downstream code or on-disk cache that references them continues to work.
+# ----------------------------------------------------------------------------
+
+def derive_shear_modulus_vrh(C11: float, C12: float, C44: float) -> Dict[str, float]:
+    """Backward-compat alias for ElasticityPhysicsEngine.compute_vrh_shear_modulus.
+
+    Kept so that v8.8.0/v8.8.1/v8.8.2 call sites and cached extractions
+    keep working.  New code should call the physics engine directly.
+    """
+    return ElasticityPhysicsEngine.compute_vrh_shear_modulus(C11, C12, C44)
+
+
+def _compute_vrh_shear_modulus(C11: float, C12: float, C44: float) -> float:
+    """Scalar Voigt-Reuss-Hill average shear modulus (in GPa).
+
+    Thin alias over the physics engine returning just the Hill value.
+    """
+    return ElasticityPhysicsEngine.compute_vrh_shear_modulus(
+        C11, C12, C44
+    )['G_H']
+
+
+def cij_plausible(C11: Optional[float],
+                  C12: Optional[float],
+                  C44: Optional[float]) -> bool:
+    """Backward-compat alias for ElasticityPhysicsEngine.plausible_cubic_cij."""
+    return ElasticityPhysicsEngine.plausible_cubic_cij(C11, C12, C44)
+
+
+def derive_bulk_modulus(C11: float, C12: float) -> float:
+    """Backward-compat alias for ElasticityPhysicsEngine.compute_bulk_modulus."""
+    return ElasticityPhysicsEngine.compute_bulk_modulus(C11, C12)
+
+
+def derive_poisson_ratio(B: float, GH: float) -> float:
+    """Backward-compat alias for ElasticityPhysicsEngine.compute_poisson_ratio."""
+    return ElasticityPhysicsEngine.compute_poisson_ratio(B, GH)
+
+
+def derive_youngs_modulus(GH: float, nu: float) -> float:
+    """Backward-compat alias for ElasticityPhysicsEngine.compute_youngs_modulus."""
+    return ElasticityPhysicsEngine.compute_youngs_modulus(GH, nu)
+
 
 def _cij_in_gpa(value: float, unit: str) -> float:
     """Convert a raw Cij value to GPa.  Defaults to GPa when unit is empty,
@@ -2894,61 +3105,6 @@ def _cij_in_gpa(value: float, unit: str) -> float:
     if 'pa' in u:
         return v * 1e-9
     return v  # default assume GPa
-
-
-def derive_shear_modulus_vrh(C11: float, C12: float, C44: float) -> Dict[str, float]:
-    """Cubic-crystal elastic constants (in GPa) -> all standard shear-modulus
-    measures.  Deterministic, auditable, no LLM arithmetic involved.
-
-    Reference: Voigt (1928), Reuss (1929), Hill (1952); standard for cubic
-    polycrystal averaging.
-    """
-    Cp = 0.5 * (C11 - C12)
-    GV = (C11 - C12 + 3.0 * C44) / 5.0
-    GR = 5.0 * (C11 - C12) * C44 / (4.0 * C44 + 3.0 * (C11 - C12))
-    GH = 0.5 * (GV + GR)
-    return dict(C_prime=Cp, G_V=GV, G_R=GR, G_H=GH,
-                zener_A=2.0 * C44 / max(C11 - C12, 1e-12))
-
-
-def _compute_vrh_shear_modulus(C11: float, C12: float, C44: float) -> float:
-    """Scalar Voigt-Reuss-Hill average shear modulus.
-
-    Thin alias over `derive_shear_modulus_vrh` returning just the Hill value.
-    Kept for call-site symmetry with the diagnostic's suggested API so that
-    downstream code can do:
-
-        mu_gh = _compute_vrh_shear_modulus(C11, C12, C44)
-
-    without having to unpack the dict.
-    """
-    return derive_shear_modulus_vrh(C11, C12, C44)['G_H']
-
-
-def cij_plausible(C11: Optional[float],
-                  C12: Optional[float],
-                  C44: Optional[float]) -> bool:
-    """Physical-bounds gate — rejects garbage (dimensionless values,
-    misparsed numbers) before they become candidates.  Ranges are for metals,
-    in GPa."""
-    if any(v is None or not (5.0 < v < 600.0) for v in (C11, C12, C44)):
-        return False
-    if C11 - C12 <= 0 or C44 <= 0:
-        return False
-    A = 2.0 * C44 / (C11 - C12)
-    return 0.3 <= A <= 12.0
-
-
-def derive_bulk_modulus(C11: float, C12: float) -> float:
-    return (C11 + 2.0 * C12) / 3.0
-
-
-def derive_poisson_ratio(B: float, GH: float) -> float:
-    return (3.0 * B - 2.0 * GH) / (2.0 * (3.0 * B + GH))
-
-
-def derive_youngs_modulus(GH: float, nu: float) -> float:
-    return 2.0 * GH * (1.0 + nu)
 
 
 # ============================================================================
@@ -3312,7 +3468,7 @@ class PlasticityFAISSRetriever:
 
 
 # ============================================================================
-# LLM PROMPTS: TWO MODES
+# LLM PROMPTS: THREE MODES
 # ============================================================================
 # ============================================================================
 # v8.8.1 FIX — READ THIS BEFORE EDITING THE TEMPLATES BELOW
@@ -3346,6 +3502,22 @@ _EXTRACT_SCHEMA = (
 )
 
 _REASONED_INFERENCE_SCHEMA = _EXTRACT_SCHEMA
+
+# ----------------------------------------------------------------------------
+# v8.8.3: dedicated STRICT Cij-only schema — no plastic-parameter slots.
+# The neuro-symbolic architecture asks the LLM for fundamentals in a
+# separate LLM pass with this dedicated schema, so the model is never
+# tempted to mix plastic-parameter reasoning into Cij extraction (or vice
+# versa).  Three fixed top-level keys, all optional (set to null if absent).
+# ----------------------------------------------------------------------------
+_CIJ_ONLY_SCHEMA = (
+    '{"C11": {"value": <number or null>, "unit": "GPa|MPa|TPa|Pa", '
+    '"evidence": "<verbatim sentence or empty>"}, '
+    '"C12": {"value": <number or null>, "unit": "GPa|MPa|TPa|Pa", '
+    '"evidence": "<verbatim sentence or empty>"}, '
+    '"C44": {"value": <number or null>, "unit": "GPa|MPa|TPa|Pa", '
+    '"evidence": "<verbatim sentence or empty>"}}'
+)
 
 _STRICT_EXTRACT_PROMPT = """You are a strict materials-science NER system.
 Extract ONLY plasticity parameters and elastic constants that are explicitly
@@ -3583,6 +3755,64 @@ TEXT:
 """
 
 # ----------------------------------------------------------------------------
+# v8.8.3: THE STRICT CIJ-ONLY EXTRACTION PROMPT
+# ----------------------------------------------------------------------------
+# This is a SECOND, SEPARATE LLM pass whose ONLY job is to extract C11,
+# C12, C44 verbatim.  It is a pure Named Entity Recognition task.  It:
+#
+#   · Explicitly FORBIDS arithmetic ("DO NOT calculate, derive, average,
+#     or convert").  The LLM is not even allowed to write "μ" in its
+#     output.
+#   · Uses a fixed three-key JSON schema (_CIJ_ONLY_SCHEMA) so the model
+#     cannot smuggle plastic-parameter reasoning into the same response.
+#   · Returns null for any Cij not present in the text, so partial triples
+#     are clearly flagged and can be skipped by the derivation layer.
+#
+# The rationale (neuro-symbolic architecture): let the LLM do what it is
+# good at (pattern-matching unstructured prose) and let the physics engine
+# do what it is good at (deterministic arithmetic).  Never ask the LLM to
+# do both — that's where hallucinations enter.
+# ----------------------------------------------------------------------------
+_STRICT_CIJ_EXTRACTION_PROMPT = """You are a strict materials-science Named Entity Recognizer (NER).
+
+Your ONLY task is to extract the SINGLE-CRYSTAL ELASTIC CONSTANTS
+C11, C12, C44 for the target material, VERBATIM from the text below.
+
+TARGET MATERIAL: <<MATERIAL>>
+
+🚨 CRITICAL RULES — VIOLATIONS WILL BE REJECTED:
+
+  1. DO NOT calculate, derive, average, or convert any value.
+     · DO NOT compute the shear modulus μ.
+     · DO NOT compute the bulk modulus K.
+     · DO NOT compute the Voigt, Reuss, or Hill averages.
+     · DO NOT convert GPa to Pa, MPa to GPa, etc.  Report the number
+       and unit EXACTLY as they appear in the text.
+
+  2. ONLY extract the raw, explicit values for C11, C12, and C44.
+
+  3. C11, C12, C44 are SINGLE-CRYSTAL elastic constants, not
+     polycrystalline moduli.  Do NOT confuse them with the shear modulus
+     μ, the Young's modulus E, or the bulk modulus K.  If the text says
+     "μ = 48 GPa", that is NOT a value of C44 — leave C44 null.
+
+  4. If a value is not explicitly stated in the text, return null for it.
+     Do NOT guess, infer, or fill in a "typical" value.
+
+  5. Preserve the units exactly as written (GPa, MPa, TPa, Pa).
+
+  6. Quote the exact sentence that contains each value in the `evidence`
+     field.  Do NOT paraphrase.
+
+OUTPUT SCHEMA (return ONLY this JSON object, no markdown, no prose):
+
+<<SCHEMA>>
+
+TEXT:
+\"\"\"<<TEXT>>\"\"\"
+"""
+
+# ----------------------------------------------------------------------------
 # v8.8.1: import-time audit of the prompt templates.
 # ----------------------------------------------------------------------------
 # If a future refactor renames a token in the template but not in the call
@@ -3599,6 +3829,11 @@ _audit_prompt_tokens(
     '_REASONED_INFERENCE_PROMPT',
     _REASONED_INFERENCE_PROMPT,
     required=['SCHEMA', 'TEXT', 'MATERIAL', 'TEMP_K', 'STRAIN_RATE'],
+)
+_audit_prompt_tokens(
+    '_STRICT_CIJ_EXTRACTION_PROMPT',
+    _STRICT_CIJ_EXTRACTION_PROMPT,
+    required=['SCHEMA', 'MATERIAL', 'TEXT'],
 )
 
 
@@ -3639,6 +3874,18 @@ class PlasticityParameterExtractor:
                 strain_rate: float, use_llm: bool = True,
                 mode: str = "reasoned_inference",
                 debug_llm: bool = False) -> List[Dict[str, Any]]:
+        """Two-pass LLM extraction (v8.8.3 neuro-symbolic architecture).
+
+        Pass 1: main extraction (plastic parameters + optional Cij) using
+                either the strict or reasoned-inference prompt.
+        Pass 2: STRICT Cij-only extraction.  This is a dedicated NER call
+                whose only job is to find C11/C12/C44 verbatim.  Pass-2
+                results OVERRIDE pass-1 Cij — pass 2 is more focused and
+                uses a fixed three-key schema that cannot smuggle in
+                plastic reasoning.
+
+        Both passes are cached separately so a re-run is cheap.
+        """
         key = _pl_hash(
             f"{text[:2000]}|{material}|{temp_k}|{strain_rate}|{use_llm}|{mode}"
         )
@@ -3648,6 +3895,8 @@ class PlasticityParameterExtractor:
         llm_out: List[Dict[str, Any]] = []
         if use_llm and self.client is not None:
             # ------------------------------------------------------------------
+            # PASS 1 — reasoned inference (plastic params + optional Cij).
+            #
             # v8.8.1 FIX: token replacement, NOT .format().
             #
             # The templates embed a JSON schema with literal { } braces.
@@ -3677,13 +3926,49 @@ class PlasticityParameterExtractor:
                     TEXT=text[:3500],
                 )
             raw = self.client.generate_json(prompt, debug=debug_llm)
-            logger.debug("Ollama raw (%s): %s", mode, raw)
+            logger.debug("Ollama pass-1 raw (%s): %s", mode, raw)
             llm_out = self._validate(raw)
             if debug_llm:
-                logger.info("LLM returned %d valid items after canonicalization "
-                            "(mode=%s): %s", len(llm_out), mode,
+                logger.info("LLM pass-1 returned %d valid items after "
+                            "canonicalization (mode=%s): %s",
+                            len(llm_out), mode,
                             [x["param"] for x in llm_out])
 
+            # ------------------------------------------------------------------
+            # PASS 2 — strict Cij-only NER (v8.8.3).
+            #
+            # This is the neuro-symbolic division of labour in action:
+            # pass 2 asks the LLM ONLY to find C11/C12/C44 verbatim, in a
+            # dedicated schema whose keys are fixed.  It cannot compute μ.
+            # It cannot average.  It cannot mix in plastic reasoning.
+            # The results of pass 2 override any pass-1 Cij extractions
+            # for the same document, because pass 2 is more focused and
+            # more reliable.
+            # ------------------------------------------------------------------
+            cij_prompt = _render_prompt(
+                _STRICT_CIJ_EXTRACTION_PROMPT,
+                SCHEMA=_CIJ_ONLY_SCHEMA,
+                MATERIAL=str(material),
+                TEXT=text[:3500],
+            )
+            cij_raw = self.client.generate_json(cij_prompt, debug=debug_llm)
+            logger.debug("Ollama pass-2 (strict Cij) raw: %s", cij_raw)
+            cij_out = self._validate_cij_only(
+                cij_raw, material, temp_k, strain_rate
+            )
+            if debug_llm:
+                logger.info("LLM pass-2 returned %d Cij item(s): %s",
+                            len(cij_out),
+                            [(x["param"], x["value"], x["unit"])
+                             for x in cij_out])
+
+            # Merge pass-2 into pass-1 — pass-2 Cij replaces pass-1 Cij.
+            if cij_out:
+                replaced = {x["param"] for x in cij_out}
+                llm_out = [e for e in llm_out if e["param"] not in replaced]
+                llm_out.extend(cij_out)
+
+        # Heuristic extraction (regex-based, always runs as a safety net)
         heuristic_out = self._heuristic(text, material, temp_k, strain_rate)
         have = {e["param"] for e in llm_out}
         for h in heuristic_out:
@@ -3691,6 +3976,7 @@ class PlasticityParameterExtractor:
                 llm_out.append(h)
                 have.add(h["param"])
 
+        # Guarantee gamma0_dot is never silently omitted
         if "gamma0_dot" not in have:
             llm_out.append({
                 "param": "gamma0_dot",
@@ -3723,6 +4009,7 @@ class PlasticityParameterExtractor:
 
     @staticmethod
     def _validate(raw: Any) -> List[Dict[str, Any]]:
+        """Validate a pass-1 (array-of-parameter-items) LLM response."""
         if raw is None:
             return []
         if isinstance(raw, dict):
@@ -3765,6 +4052,68 @@ class PlasticityParameterExtractor:
                 "confidence": float(item.get("confidence", 0.5) or 0.5),
                 "evidence": str(item.get("evidence") or "")[:240],
                 "reasoning": str(item.get("reasoning") or "")[:600],
+            })
+        return out
+
+    @staticmethod
+    def _validate_cij_only(raw: Any, material: str, temp_k: float,
+                           strain_rate: float) -> List[Dict[str, Any]]:
+        """Validate a pass-2 (strict Cij-only schema) LLM response.
+
+        The pass-2 response is a single JSON object with exactly three
+        keys — C11, C12, C44 — each of which is either null or a dict of
+        the form {"value": ..., "unit": ..., "evidence": ...}.
+
+        We convert the top-level keys into individual extraction items so
+        that downstream code sees the same flat list-of-items shape it
+        already knows how to consume.
+
+        Any key whose value is null, non-numeric, or missing is silently
+        skipped (this is the "not present in text" case).  The caller
+        (NeuroSymbolicOrchestrator) will then only see a partial Cij set
+        for that document and will correctly skip the VRH derivation.
+        """
+        if not isinstance(raw, dict):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for key in ('C11', 'C12', 'C44'):
+            entry = raw.get(key)
+            if not isinstance(entry, dict):
+                continue
+            v = entry.get('value')
+            if v is None:
+                continue
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+
+            unit = str(entry.get('unit') or 'GPa').strip()
+            evidence = str(entry.get('evidence') or '')[:240]
+
+            # Sanity-guard: reject anything outside a very wide physical
+            # envelope.  The strict bounds are enforced later by the
+            # physics engine's plausible_cubic_cij() gate, but a quick
+            # here-and-now rejection prevents obviously-garbage values
+            # (e.g. 1e-5 from a misparse) from ever reaching the pool.
+            if not (0.5 < abs(v) < 2000.0):
+                logger.debug("Rejecting Cij %s=%s %s (out of wide bounds)",
+                             key, v, unit)
+                continue
+
+            out.append({
+                "param": key,
+                "value": v,
+                "unit": unit,
+                "is_dimensionless": False,
+                "material": material,
+                "temp": temp_k,
+                "strain_rate": strain_rate,
+                "method": "explicit",
+                "confidence": 0.9,
+                "evidence": evidence,
+                "reasoning": "",
             })
         return out
 
@@ -3983,6 +4332,7 @@ class PlasticityLatentMoEScorer:
             "explicit": 0.9,
             "llm_inferred": 0.5,
             "fundamental": 0.85,     # v8.8.2: deterministic VRH derivation
+            "fundamental_vrh": 0.85, # v8.8.3: explicit alias
             "llm_derived": 0.85,     # v8.8.0 legacy alias (kept for caches)
             "default_fallback": 0.3,
         }.get((method or "").lower(), 0.5)
@@ -3992,7 +4342,8 @@ class PlasticityLatentMoEScorer:
         method_l = (method or "").lower()
         if method_l not in ("llm_inferred", "heuristic",
                             "default_fallback",
-                            "fundamental", "llm_derived"):
+                            "fundamental", "fundamental_vrh",
+                            "llm_derived"):
             return 0.5
         if not reasoning:
             return 0.2
@@ -4082,8 +4433,259 @@ class PlasticityLatentMoEScorer:
                 + self.w_reasoning * s_reason)
 
 
+# ============================================================================
+# ███████████████████████████████████████████████████████████████████████████
+# ███  v8.8.3: NEURO-SYMBOLIC ORCHESTRATOR                              ██████
+# ███                                                                   ██████
+# ███  The bridge between the NEURO side (LLM extracts Cij verbatim)    ██████
+# ███  and the SYMBOLIC side (physics engine computes μ via VRH).        ██████
+# ███                                                                   ██████
+# ███  Workflow per source document:                                     ██████
+# ███    1. Group C11/C12/C44 extractions by source document.           ██████
+# ███    2. For each document with a complete, plausible Cij triple:     ██████
+# ███        a. Convert all three values to GPa (no LLM arithmetic).     ██████
+# ███        b. Run ElasticityPhysicsEngine.compute_vrh_shear_modulus() ██████
+# ███        c. Inject the Hill average G_H as a 'mu' candidate with     ██████
+# ███           method='fundamental' and provenance tag 'fundamental'.   ██████
+# ███    3. Also inject the Voigt G_V and Reuss G_R bounds as            ██████
+# ███       alternatives (ranked slightly below G_H).                    ██████
+# ███                                                                   ██████
+# ███  The LLM's numerical contribution to the final μ is EXACTLY ZERO.  ██████
+# ███  Its only role was to find three numbers in unstructured prose.    ██████
+# ███████████████████████████████████████████████████████████████████████████
+# ============================================================================
+
+class NeuroSymbolicOrchestrator:
+    """Bridge between LLM extraction (semantic) and physics (symbolic).
+
+    The class is intentionally stateless — every call is a pure function
+    of its arguments (aside from the injected scorer, which is also
+    stateless in practice).  This makes the orchestrator trivially
+    unit-testable and makes its provenance guarantees auditable.
+
+    Typical usage::
+
+        orch = NeuroSymbolicOrchestrator(scorer)
+        candidates, n_added, n_excluded = orch.augment_with_derived_mu(
+            candidates, extractions, target_material, target_temp
+        )
+
+    The three return values mirror the old free-function signature so
+    downstream callers don't need to change.
+    """
+
+    def __init__(self, scorer: PlasticityLatentMoEScorer):
+        self.scorer = scorer
+        self.physics = ElasticityPhysicsEngine()
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+    def augment_with_derived_mu(
+            self,
+            candidates: Dict[str, List[PlasticityCandidate]],
+            extractions: List[Dict[str, Any]],
+            target_material: str,
+            target_temp: float,
+            top_k: int = 8,
+    ) -> Tuple[Dict[str, List[PlasticityCandidate]], int, int]:
+        """Group C11/C12/C44 extractions by source document, run VRH in code,
+        inject G_H / G_R / G_V as 'mu' candidates with provenance
+        'fundamental'.
+
+        Returns (candidates, n_derived_added, n_dimensionless_excluded).
+        """
+        # ── 1. Group Cij by source document ────────────────────────────
+        by_doc: Dict[Tuple[str, str], Dict[str, Dict[str, Any]]] = {}
+        for ext in extractions:
+            p = ext.get("param")
+            if p not in FUNDAMENTAL_PARAMS:
+                continue
+            key = (ext.get("_source_file", ""), ext.get("_source_title", ""))
+            by_doc.setdefault(key, {})[p] = ext
+
+        new_mu = list(candidates.get("mu", []))
+        n_derived_added = 0
+
+        # ── 2. For each doc with a complete Cij triple, run the physics ─
+        for (src_file, src_title), cdict in by_doc.items():
+            if not all(k in cdict for k in ("C11", "C12", "C44")):
+                continue
+            try:
+                C11 = _cij_in_gpa(cdict["C11"]["value"],
+                                  cdict["C11"].get("unit", ""))
+                C12 = _cij_in_gpa(cdict["C12"]["value"],
+                                  cdict["C12"].get("unit", ""))
+                C44 = _cij_in_gpa(cdict["C44"]["value"],
+                                  cdict["C44"].get("unit", ""))
+            except Exception as e:
+                logger.debug("Cij coercion failed for %s: %s",
+                             src_title[:50], e)
+                continue
+
+            # Physics gate — reject physically impossible triples
+            if not self.physics.plausible_cubic_cij(C11, C12, C44):
+                logger.info(
+                    "Rejecting implausible Cij triple "
+                    "(C11=%.1f, C12=%.1f, C44=%.1f) from %s",
+                    C11, C12, C44, src_title[:50],
+                )
+                continue
+
+            # ── SYMBOLIC STEP: the ONLY arithmetic in the pipeline ─────
+            d = self.physics.compute_vrh_shear_modulus(C11, C12, C44)
+            B = self.physics.compute_bulk_modulus(C11, C12)
+            nu = self.physics.compute_poisson_ratio(B, d["G_H"])
+            E = self.physics.compute_youngs_modulus(d["G_H"], nu)
+            # --------------------------------------------------------
+
+            mat = (cdict["C11"].get("material") or
+                   cdict["C12"].get("material") or
+                   target_material)
+            temp = (cdict["C11"].get("temp") or
+                    cdict["C12"].get("temp") or
+                    target_temp)
+
+            quote = (
+                f"C11={C11:.2f}, C12={C12:.2f}, C44={C44:.2f} GPa (verbatim).  "
+                f"→ C'={d['C_prime']:.2f}, "
+                f"G_V={d['G_V']:.2f}, G_R={d['G_R']:.2f}, "
+                f"G_H={d['G_H']:.2f} GPa.  "
+                f"B={B:.2f} GPa, ν={nu:.3f}, E={E:.1f} GPa, "
+                f"A={d['zener_A']:.3f}."
+            )
+
+            reasoning_hill = (
+                f"Step 1: Extracted C11={C11}, C12={C12}, C44={C44} GPa "
+                f"verbatim from '{src_title[:50]}' (LLM did NER only).\n"
+                f"Step 2: C' = (C11-C12)/2 = {d['C_prime']:.2f} GPa.\n"
+                f"Step 3: Voigt average G_V = (C11-C12+3*C44)/5 = "
+                f"{d['G_V']:.2f} GPa.\n"
+                f"Step 4: Reuss average G_R = 5*(C11-C12)*C44 / "
+                f"(4*C44 + 3*(C11-C12)) = {d['G_R']:.2f} GPa.\n"
+                f"Step 5: Hill average G_H = (G_V + G_R)/2 = "
+                f"{d['G_H']:.2f} GPa (canonical polycrystalline shear "
+                f"modulus for the constitutive law).\n"
+                f"Step 6: Computed deterministically by "
+                f"ElasticityPhysicsEngine.compute_vrh_shear_modulus(); "
+                f"NO LLM arithmetic was involved."
+            )
+            reasoning_reuss = (
+                reasoning_hill +
+                f"\nStep 7: Reporting the Reuss lower bound "
+                f"G_R = {d['G_R']:.2f} GPa as an alternative."
+            )
+            reasoning_voigt = (
+                reasoning_hill +
+                f"\nStep 7: Reporting the Voigt upper bound "
+                f"G_V = {d['G_V']:.2f} GPa as an alternative."
+            )
+
+            # ── G_H — the canonical VRH-Hill value (ranked first) ──────
+            score_hill = self.scorer.score_derived(
+                method='fundamental', material=mat, temp_k=temp,
+                target_material=target_material, target_temp=target_temp,
+                reasoning=reasoning_hill, confidence=0.85,
+            )
+            new_mu.append(PlasticityCandidate(
+                param='mu',
+                value_si=d['G_H'] * 1e9,
+                raw_value=d['G_H'],
+                raw_unit='GPa',
+                score=score_hill,
+                confidence=0.85,
+                material=mat,
+                temp_k=temp,
+                strain_rate=None,
+                method='fundamental',   # ← the KEY provenance tag
+                source_file=src_file,
+                source_title=src_title,
+                evidence=f"VRH-Hill: {quote}",
+                reasoning=reasoning_hill,
+                clamped=False,
+                is_dimensionless=False,
+            ))
+            n_derived_added += 1
+
+            # ── G_R — Reuss lower bound ─────────────────────────────────
+            new_mu.append(PlasticityCandidate(
+                param='mu',
+                value_si=d['G_R'] * 1e9,
+                raw_value=d['G_R'],
+                raw_unit='GPa',
+                score=score_hill * 0.97,
+                confidence=0.75,
+                material=mat,
+                temp_k=temp,
+                strain_rate=None,
+                method='fundamental',
+                source_file=src_file,
+                source_title=src_title,
+                evidence=f"VRH-Reuss: {quote}",
+                reasoning=reasoning_reuss,
+                clamped=False,
+                is_dimensionless=False,
+            ))
+            n_derived_added += 1
+
+            # ── G_V — Voigt upper bound ─────────────────────────────────
+            new_mu.append(PlasticityCandidate(
+                param='mu',
+                value_si=d['G_V'] * 1e9,
+                raw_value=d['G_V'],
+                raw_unit='GPa',
+                score=score_hill * 0.97,
+                confidence=0.75,
+                material=mat,
+                temp_k=temp,
+                strain_rate=None,
+                method='fundamental',
+                source_file=src_file,
+                source_title=src_title,
+                evidence=f"VRH-Voigt: {quote}",
+                reasoning=reasoning_voigt,
+                clamped=False,
+                is_dimensionless=False,
+            ))
+            n_derived_added += 1
+
+        # ── 3. Dimensionless-context veto on the μ pool ────────────────
+        n_dimensionless_excluded = 0
+        filtered_mu: List[PlasticityCandidate] = []
+        for c in new_mu:
+            # Never apply the veto to derived candidates (their Cij inputs
+            # have already passed plausible_cubic_cij) or to explicit
+            # quotes.  Accept every historical spelling of the derived
+            # provenance tag so candidates from a stale cache survive.
+            if c.method in ('fundamental', 'fundamental_vrh',
+                            'llm_derived', 'explicit'):
+                filtered_mu.append(c)
+                continue
+            if c.is_dimensionless:
+                n_dimensionless_excluded += 1
+                logger.info(
+                    "Dimensionless-flag veto on μ candidate: value=%s %s "
+                    "from %s", c.raw_value, c.raw_unit, c.source_file,
+                )
+                continue
+            if is_dimensionless_context(c.evidence):
+                n_dimensionless_excluded += 1
+                logger.info(
+                    "Dimensionless-context veto on μ candidate: %s",
+                    c.evidence[:100],
+                )
+                continue
+            filtered_mu.append(c)
+
+        filtered_mu.sort(key=lambda c: c.score, reverse=True)
+        candidates['mu'] = filtered_mu[:top_k]
+        return candidates, n_derived_added, n_dimensionless_excluded
+
+
 # ----------------------------------------------------------------------------
-# v8.8.0: candidate assembly — inject VRH-derived μ candidates
+# Backward-compat shim: the old free function now delegates to the
+# orchestrator so that any code (or cached session state) that still calls
+# `augment_candidates_with_derived_mu(...)` continues to work unchanged.
 # ----------------------------------------------------------------------------
 def augment_candidates_with_derived_mu(
         candidates: Dict[str, List[PlasticityCandidate]],
@@ -4093,178 +4695,18 @@ def augment_candidates_with_derived_mu(
         target_strain_rate: float,
         top_k: int = 8,
 ) -> Tuple[Dict[str, List[PlasticityCandidate]], int, int]:
-    """Group C11/C12/C44 extractions by source document, run VRH in code,
-    inject G_H / G_R / G_V as 'mu' candidates with provenance 'fundamental'
-    (v8.8.2; formerly 'llm_derived' in v8.8.0).
+    """Backward-compat shim for NeuroSymbolicOrchestrator.augment_with_derived_mu.
 
-    Returns (candidates, n_derived_added, n_dimensionless_excluded).
+    The `target_strain_rate` argument is accepted for signature compatibility
+    but is not used by the orchestrator (VRH μ does not depend on strain
+    rate).  Retained as a standalone function because the original v8.8.0
+    code called it that way.
     """
-    scorer = PlasticityLatentMoEScorer()
-
-    # ── 1. Group Cij by source document ─────────────────────────────────
-    by_doc: Dict[Tuple[str, str], Dict[str, Dict[str, Any]]] = {}
-    for ext in extractions:
-        p = ext.get("param")
-        if p not in FUNDAMENTAL_PARAMS:
-            continue
-        key = (ext.get("_source_file", ""), ext.get("_source_title", ""))
-        by_doc.setdefault(key, {})[p] = ext
-
-    new_mu = list(candidates.get("mu", []))
-    n_derived_added = 0
-
-    for (src_file, src_title), cdict in by_doc.items():
-        if not all(k in cdict for k in ("C11", "C12", "C44")):
-            continue
-        try:
-            C11 = _cij_in_gpa(cdict["C11"]["value"],
-                              cdict["C11"].get("unit", ""))
-            C12 = _cij_in_gpa(cdict["C12"]["value"],
-                              cdict["C12"].get("unit", ""))
-            C44 = _cij_in_gpa(cdict["C44"]["value"],
-                              cdict["C44"].get("unit", ""))
-        except Exception as e:
-            logger.debug("Cij coercion failed for %s: %s", src_title[:50], e)
-            continue
-
-        if not cij_plausible(C11, C12, C44):
-            logger.info("Rejecting implausible Cij triple (C11=%.1f, C12=%.1f, "
-                        "C44=%.1f) from %s", C11, C12, C44, src_title[:50])
-            continue
-
-        d = derive_shear_modulus_vrh(C11, C12, C44)
-        B = derive_bulk_modulus(C11, C12)
-        nu = derive_poisson_ratio(B, d["G_H"])
-        E = derive_youngs_modulus(d["G_H"], nu)
-
-        mat = (cdict["C11"].get("material") or
-               cdict["C12"].get("material") or
-               target_material)
-        temp = (cdict["C11"].get("temp") or
-                cdict["C12"].get("temp") or
-                target_temp)
-
-        quote = (
-            f"C11={C11:.2f}, C12={C12:.2f}, C44={C44:.2f} GPa (verbatim).  "
-            f"→ C'={d['C_prime']:.2f}, "
-            f"G_V={d['G_V']:.2f}, G_R={d['G_R']:.2f}, G_H={d['G_H']:.2f} GPa.  "
-            f"B={B:.2f} GPa, ν={nu:.3f}, E={E:.1f} GPa, A={d['zener_A']:.3f}."
-        )
-
-        reasoning_hill = (
-            f"Step 1: Extracted C11={C11}, C12={C12}, C44={C44} GPa verbatim "
-            f"from '{src_title[:50]}'.\n"
-            f"Step 2: C' = (C11-C12)/2 = {d['C_prime']:.2f} GPa.\n"
-            f"Step 3: Voigt average G_V = (C11-C12+3*C44)/5 = {d['G_V']:.2f} GPa.\n"
-            f"Step 4: Reuss average G_R = 5*(C11-C12)*C44 / "
-            f"(4*C44 + 3*(C11-C12)) = {d['G_R']:.2f} GPa.\n"
-            f"Step 5: Hill average G_H = (G_V + G_R)/2 = {d['G_H']:.2f} GPa "
-            f"(this is the canonical polycrystalline shear modulus for the "
-            f"constitutive law)."
-        )
-        reasoning_reuss = (
-            reasoning_hill + f"\nStep 6: Reporting the Reuss lower bound "
-            f"G_R = {d['G_R']:.2f} GPa as an alternative."
-        )
-        reasoning_voigt = (
-            reasoning_hill + f"\nStep 6: Reporting the Voigt upper bound "
-            f"G_V = {d['G_V']:.2f} GPa as an alternative."
-        )
-
-        # G_H — canonical VRH-Hill value (ranked first among the trio)
-        score_hill = scorer.score_derived(
-            method='fundamental', material=mat, temp_k=temp,
-            target_material=target_material, target_temp=target_temp,
-            reasoning=reasoning_hill, confidence=0.75,
-        )
-        new_mu.append(PlasticityCandidate(
-            param='mu',
-            value_si=d['G_H'] * 1e9,
-            raw_value=d['G_H'],
-            raw_unit='GPa',
-            score=score_hill,
-            confidence=0.75,
-            material=mat,
-            temp_k=temp,
-            strain_rate=None,
-            method='fundamental',
-            source_file=src_file,
-            source_title=src_title,
-            evidence=f"VRH-Hill: {quote}",
-            reasoning=reasoning_hill,
-            clamped=False,
-            is_dimensionless=False,
-        ))
-        n_derived_added += 1
-
-        # G_R — Reuss lower bound (score multiplied slightly down)
-        new_mu.append(PlasticityCandidate(
-            param='mu',
-            value_si=d['G_R'] * 1e9,
-            raw_value=d['G_R'],
-            raw_unit='GPa',
-            score=score_hill * 0.97,
-            confidence=0.70,
-            material=mat,
-            temp_k=temp,
-            strain_rate=None,
-            method='fundamental',
-            source_file=src_file,
-            source_title=src_title,
-            evidence=f"VRH-Reuss: {quote}",
-            reasoning=reasoning_reuss,
-            clamped=False,
-            is_dimensionless=False,
-        ))
-        n_derived_added += 1
-
-        # G_V — Voigt upper bound
-        new_mu.append(PlasticityCandidate(
-            param='mu',
-            value_si=d['G_V'] * 1e9,
-            raw_value=d['G_V'],
-            raw_unit='GPa',
-            score=score_hill * 0.97,
-            confidence=0.70,
-            material=mat,
-            temp_k=temp,
-            strain_rate=None,
-            method='fundamental',
-            source_file=src_file,
-            source_title=src_title,
-            evidence=f"VRH-Voigt: {quote}",
-            reasoning=reasoning_voigt,
-            clamped=False,
-            is_dimensionless=False,
-        ))
-        n_derived_added += 1
-
-    # ── 2. Dimensionless-context veto on the μ pool ────────────────────
-    n_dimensionless_excluded = 0
-    filtered_mu: List[PlasticityCandidate] = []
-    for c in new_mu:
-        # Never apply the veto to derived candidates (their Cij inputs have
-        # already passed cij_plausible) or to explicit quotes.  Accept both
-        # the v8.8.2 key ('fundamental') and the v8.8.0 legacy key
-        # ('llm_derived') so candidates from a stale on-disk cache survive.
-        if c.method in ('fundamental', 'llm_derived', 'explicit'):
-            filtered_mu.append(c)
-            continue
-        if c.is_dimensionless:
-            n_dimensionless_excluded += 1
-            logger.info("Dimensionless-flag veto on μ candidate: value=%s %s "
-                        "from %s", c.raw_value, c.raw_unit, c.source_file)
-            continue
-        if is_dimensionless_context(c.evidence):
-            n_dimensionless_excluded += 1
-            logger.info("Dimensionless-context veto on μ candidate: %s",
-                        c.evidence[:100])
-            continue
-        filtered_mu.append(c)
-
-    filtered_mu.sort(key=lambda c: c.score, reverse=True)
-    candidates['mu'] = filtered_mu[:top_k]
-    return candidates, n_derived_added, n_dimensionless_excluded
+    _ = target_strain_rate  # signature compat; not used by VRH
+    orchestrator = NeuroSymbolicOrchestrator(PlasticityLatentMoEScorer())
+    return orchestrator.augment_with_derived_mu(
+        candidates, extractions, target_material, target_temp, top_k=top_k
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -4460,6 +4902,10 @@ class PlasticityRecommender:
         )
         self.scorer = PlasticityLatentMoEScorer()
         self.prior_learner = PlasticityMaterialPriorLearner(self.extractor)
+        # v8.8.3: the neuro-symbolic orchestrator holds the physics engine.
+        # The orchestrator is stateless, so a single instance is shared
+        # across the recommendation pipeline.
+        self.ns_orchestrator = NeuroSymbolicOrchestrator(self.scorer)
         self.top_k_retrieval = top_k_retrieval
         self.debug_llm = debug_llm
 
@@ -4569,9 +5015,13 @@ class PlasticityRecommender:
         candidates = self.scorer.score(extractions, material, temp_k,
                                        target_strain_rate=strain_rate, top_k=8)
 
-        # ── 4. v8.8.0: derive μ from Cij and inject as candidates ───────
-        candidates, n_derived, n_dimless = augment_candidates_with_derived_mu(
-            candidates, extractions, material, temp_k, strain_rate, top_k=8
+        # ── 4. v8.8.3: NEURO-SYMBOLIC AUGMENTATION ──────────────────────
+        # The orchestrator groups Cij extractions by source doc, runs the
+        # physics engine's VRH computation on each plausible triple, and
+        # injects G_H / G_R / G_V as 'fundamental'-provenance μ candidates.
+        # The LLM's contribution to the final μ value is EXACTLY ZERO.
+        candidates, n_derived, n_dimless = self.ns_orchestrator.augment_with_derived_mu(
+            candidates, extractions, material, temp_k, top_k=8
         )
         # ---------------------------------------------------------------
 
@@ -4831,6 +5281,20 @@ def _plr_render_parameter_selector(param: str,
             f"method={chosen.method}, conf={chosen.confidence:.2f}"
             + (" | ⚠️ clamped" if chosen.clamped else "")
         )
+
+        # v8.8.3: explicit neuro-symbolic provenance banner.  When the
+        # candidate is a VRH-derived μ value, we make it visually obvious
+        # that the number came from deterministic physics, not from the
+        # LLM.  This is the UI counterpart of the 'fundamental' provenance
+        # tag in the scoring layer and the ○ marker in the bar chart.
+        if _norm_provenance(chosen.method) == 'fundamental':
+            st.info(
+                "🔬 **Derived via Voigt-Reuss-Hill averaging** from "
+                "C₁₁ / C₁₂ / C₄₄ extracted verbatim by the LLM. "
+                "The LLM contributed zero arithmetic — this value is "
+                "deterministic, reproducible, and unit-testable."
+            )
+
         if chosen.evidence:
             st.markdown("**📚 Evidence snippet**")
             with st.container():
@@ -4849,7 +5313,7 @@ def render_plasticity_recommender_sidebar(
     default_strain_rate: float = 1e-3,
     ollama_model: str = "qwen2.5:7b",
 ):
-    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.2")
+    st.subheader("🤖 Intelligent Plasticity Recommender v8.8.3")
     st.caption(
         "FAISS + SentenceTransformer retrieval · Ollama NER · LatentMoE scoring · "
         "dual-mode prompts · param-alias canonicalization · "
@@ -4861,7 +5325,10 @@ def render_plasticity_recommender_sidebar(
         "no more `IndexError` from braces inside the JSON schema. "
         "**v8.8.2:** the bar-chart legend is now **dynamic** — each chart "
         "only shows the provenance markers that actually appear among its "
-        "candidates."
+        "candidates. "
+        "**v8.8.3:** true **neuro-symbolic** architecture — a dedicated "
+        "strict-Cij NER pass feeds a deterministic `ElasticityPhysicsEngine`. "
+        "The LLM never performs arithmetic."
     )
 
     col1, col2 = st.columns(2)
@@ -4936,8 +5403,8 @@ def render_plasticity_recommender_sidebar(
         key=f"{_PLR}debug_llm",
         help=("Enable this to see exactly what the LLM emits before the "
               "alias-canonicalization / value-coercion filters run. "
-              "Look for `param:\"C11\"` / `param:\"C12\"` / `param:\"C44\"` "
-              "items — those feed the VRH derivation."),
+              "Look for the strict-Cij pass-2 output — those three numbers "
+              "feed the deterministic VRH derivation."),
     )
 
     btn1, btn2, btn3 = st.columns(3)
@@ -5021,7 +5488,9 @@ def render_plasticity_recommender_sidebar(
         st.success(
             f"🔬 {bundle.n_derived_mu} μ candidate(s) derived in-code from "
             "extracted C₁₁/C₁₂/C₄₄ via Voigt-Reuss-Hill averaging. "
-            "Look for **🔬 VRH** tags in the μ options below."
+            "Look for **🔬 VRH** tags in the μ options below. "
+            "The LLM contributed zero arithmetic — the physics engine is "
+            "the sole source of the final number."
         )
     if bundle.n_dimensionless_excluded > 0:
         st.info(
@@ -5658,8 +6127,8 @@ def render_recommender_bars_pub(bundle: PlasticityRecommendationBundle,
 
     candidates = [c.value_si / spec["ui_scale"] for c in cands]
     scores = [float(c.score) for c in cands]
-    # v8.8.2: raw method strings go into plot_candidate_scores, which
-    # normalizes them via _norm_provenance().  'fundamental' will map to
+    # v8.8.3: raw method strings go into plot_candidate_scores, which
+    # normalizes them via _norm_provenance().  'fundamental' maps to
     # itself; legacy 'llm_derived' entries still map to 'fundamental'.
     provenance = [c.method for c in cands]
 
@@ -5801,7 +6270,7 @@ def render_recommender_treemap_pub(bundle: PlasticityRecommendationBundle,
             c_id = f"{p}_{j}_{_pl_hash(c.source_file)[:6]}"
             ids.append(c_id)
             val_str = _pl_fmt(p, c.value_si)
-            # v8.8.2: tag the treemap leaves with their provenance marker.
+            # v8.8.3: tag the treemap leaves with their provenance marker.
             # 'fundamental' is the canonical key; legacy 'llm_derived'
             # normalizes to it via _norm_provenance.
             prov_tag = {'fundamental': ' 🔬VRH',
@@ -6291,7 +6760,9 @@ def render_recommender_visuals_dashboard():
         "are drawn with a distinct **●** marker in the bar chart legend. "
         "**v8.8.2:** that legend is now **dynamic** — a marker only appears "
         "if at least one candidate on the current chart actually carries "
-        "that provenance (so the VRH marker never shows on a ρ₀ chart)."
+        "that provenance (so the VRH marker never shows on a ρ₀ chart). "
+        "**v8.8.3:** the derivation is now produced by a deterministic "
+        "`ElasticityPhysicsEngine`; the LLM only performs NER."
     )
 
     chart_type = st.selectbox(
@@ -6415,16 +6886,16 @@ def main():
                 unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color: #F0F9FF; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem;">
-    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.2:</strong><br>
+    <strong>✅ PURE FFT SPECTRAL + AI PLASTICITY RECOMMENDER v8.8.3:</strong><br>
     • <span style="color: green;">NO FDM/NUMBA:</span> exact spectral operators.<br>
     • <span style="color: green;">SEMI-IMPLICIT FOURIER:</span> unconditional linear stability.<br>
     • <span style="color: green;">🤖 REASONING RECOMMENDER:</span> FAISS + Ollama + LatentMoE + dual-mode prompts.<br>
-    • <span style="color: green;">🔬 VRH DERIVATION LAYER (v8.8.0):</span> the LLM extracts C₁₁/C₁₂/C₄₄ verbatim; pure Python derives μ via Voigt-Reuss-Hill averaging. No LLM arithmetic.<br>
-    • <span style="color: green;">🎯 PROVENANCE:</span> three-tier — direct (🦙) · fundamental/VRH (🔬) · heuristic (⚙️) — with distinct marker shapes in the bar chart.<br>
+    • <span style="color: green;">🔬 NEURO-SYMBOLIC ARCHITECTURE (v8.8.3):</span> the LLM performs <em>only</em> Named Entity Recognition — it finds C₁₁/C₁₂/C₄₄ verbatim. A dedicated <code>ElasticityPhysicsEngine</code> then computes μ via Voigt-Reuss-Hill averaging. The LLM contributes <strong>zero</strong> arithmetic.<br>
+    • <span style="color: green;">🎯 PROVENANCE:</span> three-tier — direct (🦙) · fundamental/VRH (🔬) · heuristic (⚙️) — with dynamic bar-chart legends that only show the markers actually present.<br>
     • <span style="color: green;">🚫 DIMENSIONLESS VETO:</span> "μ = 1" reduced-units candidates are excluded from the μ pool.<br>
     • <span style="color: green;">📊 PUBLICATION VISUALS:</span> Radar / Bars / Sankey / Treemap + full styling.<br>
-    • <span style="color: green;">🛠️ PROMPT TEMPLATING FIX (v8.8.1):</span> prompt rendering uses <code>&lt;&lt;TOKEN&gt;&gt;</code> replacement instead of <code>str.format()</code> — the JSON schema braces in the prompt can no longer raise <code>IndexError: Replacement index 1 out of range</code>.<br>
-    • <span style="color: green;">🎨 DYNAMIC LEGEND (v8.8.2):</span> the bar-chart legend now renders <em>only</em> the provenance markers that actually appear among the current candidates — so a ρ₀ chart shows ◇ + △, and the ○ VRH marker appears <em>only</em> on charts whose candidates include a code-derived value.<br>
+    • <span style="color: green;">🛠️ PROMPT SAFETY (v8.8.1):</span> <code>&lt;&lt;TOKEN&gt;&gt;</code> replacement — no more <code>IndexError</code> from schema braces.<br>
+    • <span style="color: green;">🔬 VRH DERIVATION BANNER (v8.8.3):</span> every μ candidate tagged <em>fundamental</em> shows an explicit "Derived via Voigt-Reuss-Hill averaging" info box with the full three-step chain.<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -6463,7 +6934,7 @@ def main():
 
         st.markdown("---")
 
-        with st.expander("🧠 AI Plasticity Recommender v8.8.2", expanded=False):
+        with st.expander("🧠 AI Plasticity Recommender v8.8.3", expanded=False):
             render_plasticity_recommender_sidebar(
                 default_material=st.session_state.get("material", "Cu"),
                 default_temp=300.0,
