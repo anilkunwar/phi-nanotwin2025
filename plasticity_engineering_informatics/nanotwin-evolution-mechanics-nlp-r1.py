@@ -1437,7 +1437,7 @@ PARAM_FILES = {
     "mu":         "shear_modulus_metadatabase.json",
     "sigma0":     "friction_lattice_stress_metadatabase.json",
     "rho0":       "initial_dislocation_density_metadatabase.json",
-    "srs":        "strain_rate_sensitivity_metadatabase.json",
+    "srs":        "inverse_strain_rate_sensitivity_metadatabase.json",
     "gamma0_dot": "reference_strain_rate_metadatabase.json",
 }
 
