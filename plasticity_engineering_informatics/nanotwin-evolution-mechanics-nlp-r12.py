@@ -2016,7 +2016,7 @@ PLASTICITY_ONTOLOGY: Dict[str, Dict[str, Any]] = {
         "unit": "dimensionless", "ui_unit": "–", "ui_scale": 1.0,
         "valid_range": (1.0, 200.0), "soft_range": (5.0, 50.0),
         "defaults": {"Cu": 20.0, "Al": 20.0, "Ni": 20.0},
-        "expected_file": "strain_rate_sensitivity_metadatabase.json",
+        "expected_file": "inverse_strain_rate_sensitivity_metadatabase.json",
     },
     "sigma0": {
         "label": "Friction / Initial Yield Stress",
@@ -2049,7 +2049,7 @@ TARGET_JSON_FILES: List[str] = [
     "initial_dislocation_density_metadatabase.json",
     "reference_strain_rate_metadatabase.json",
     "shear_modulus_metadatabase.json",
-    "strain_rate_sensitivity_metadatabase.json",
+    "inverse_strain_rate_sensitivity_metadatabase.json",
 ]
 
 
