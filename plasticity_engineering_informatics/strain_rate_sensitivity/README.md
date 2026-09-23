@@ -1,4 +1,4 @@
-# Strain Rate Sensitivity m
+# Inverse strain Rate Sensitivity m = 1/n (where n is strain rate sensitivity)
 
 ## How to download complete knowledge base of m of nanotwinned CU from arxiV database
 
