@@ -1,1 +1,4 @@
 
+# Schematics and Visualization
+
+[![meaningtowords](https://img.shields.io/badge/phifft-v1.0-yellow)](https://phi-fft-schematic1.streamlit.app/) (Schematic image for illustration of phi-fft)
