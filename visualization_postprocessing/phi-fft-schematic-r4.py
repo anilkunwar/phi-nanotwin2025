@@ -1,8 +1,3 @@
-Here is the expanded and fully customized code. I have added comprehensive controls for **typography** (label, equation, and legend font sizes), **domain padding**, and a **colormap selector** with 60+ options (including `rainbow`, `inferno`, `jet`, and `turbo`). 
-
-The colormap is now dynamically applied to the signal line (as a gradient), the 3D panels, and the spectral peaks. I also removed the default 3D axis panes for a cleaner, publication-quality look.
-
-```python
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import FancyArrowPatch
@@ -250,4 +245,4 @@ ax.set_zlim(-4, 4)
 
 plt.tight_layout()
 st.pyplot(fig)
-```
+
