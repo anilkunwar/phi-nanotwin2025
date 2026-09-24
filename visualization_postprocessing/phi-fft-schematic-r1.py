@@ -49,9 +49,9 @@ s_total = s1 + s2
 
 # Colors
 c_total = "#1f77b4"  # Dark Blue
-c_c1 = "#ff7f0e"  # Orange
-c_c2 = "#2ca02c"  # Green
-c_fft = "#d62728"  # Red/Purple
+c_c1 = "#ff7f0e"     # Orange
+c_c2 = "#2ca02c"     # Green
+c_fft = "#d62728"    # Red/Purple
 
 # 1. Real Space / Time Domain Plane (Front Plane: y = 0)
 y_real = 0
@@ -141,12 +141,12 @@ ax.scatter([x_fourier], [y_k2], [amp2], color=c_c2, s=40)
 ax.set_axis_off()
 ax.view_init(elev=elev, azim=azim)
 
-# Labels
+# Text labels with compatible Matplotlib MathText syntax
 ax.text(
     5,
     -0.5,
     -2.0,
-    "Real Space Domain\n$\phi(\mathbf{r})$",
+    "Real Space Domain\n" + r"$\phi(\mathbf{r})$",
     fontsize=11,
     fontweight="bold",
     ha="center",
@@ -155,7 +155,7 @@ ax.text(
     10.2,
     2.5,
     -0.6,
-    "Fourier / Wavenumber Domain\n$\hat{\phi}(\mathbf{k}) = \mathcal{F}\{\phi(\mathbf{r})\}$",
+    "Fourier / Wavenumber Domain\n" + r"$\hat{\phi}(\mathbf{k}) = F\{\phi(\mathbf{r})\}$",
     fontsize=11,
     fontweight="bold",
     ha="center",
@@ -166,7 +166,7 @@ fig.text(
     0.51,
     0.12,
     "Fast Fourier Transform (FFT)\n"
-    r"$\nabla^2 \phi(\mathbf{r}) \xrightarrow{\quad\mathcal{F}\quad} -k^2 \hat{\phi}(\mathbf{k})$",
+    + r"$\nabla^2 \phi(\mathbf{r}) \longrightarrow -k^2 \hat{\phi}(\mathbf{k})$",
     fontsize=12,
     fontweight="bold",
     color="#a00000",
