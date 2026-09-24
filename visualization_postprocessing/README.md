@@ -11,6 +11,12 @@
 
 [![meaningtowords](https://img.shields.io/badge/phifft-v4.0-turquoise)](https://phi-fft-schematic4.streamlit.app/) (Schematic image for illustration of phi-fft)
 
+[![meaningtowords](https://img.shields.io/badge/phifft-v5.0-turquoise)](https://phi-fft-schematic5.streamlit.app/) (Schematic image for illustration of phi-fft)
+
+[![meaningtowords](https://img.shields.io/badge/phifft-v6.0-turquoise)](https://phi-fft-schematic6.streamlit.app/) (Schematic image for illustration of phi-fft)
+
+
+
 
 ## LLM schematic 
 
