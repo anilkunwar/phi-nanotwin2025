@@ -31,10 +31,10 @@ st.set_page_config(
 st.title("Phase-Field FFT Spectral Method Schematic")
 st.markdown(
     r"""
-This interactive visualization shows the transformation of $\phi(\mathbf{r})$ into 
- $\hat{\phi}(\mathbf{k}) = \mathcal{F}\{\phi(\mathbf{r})\}$ via the **Fast Fourier Transform (FFT)**.
+This interactive visualization shows the transformation of $\phi(\mathbf{r})$ into
+$\hat{\phi}(\mathbf{k}) = \mathcal{F}\{\phi(\mathbf{r})\}$ via the **Fast Fourier Transform (FFT)**.
 
-The real-space and wavenumber domains are shown side-by-side with sufficient padding, 
+The real-space and wavenumber domains are shown side-by-side with sufficient padding,
 connected by a directional FFT arrow (and an inverse-FFT return path).
 """
 )
@@ -180,13 +180,14 @@ ax.text(x_fourier, k_max + 0.7, -1.6,
         bbox=dict(boxstyle="round,pad=0.4", facecolor=C_FOUR,
                   edgecolor=C_FFT, alpha=0.9, linewidth=1.2))
 
-# Bottom: FFT operating equations (matching the paper)
+# Bottom: FFT operating equations
+# NOTE: the entire \dfrac{...}{...} must live inside ONE raw string
 fig.text(0.5, 0.025,
          r"$\mathcal{F}\!\left[\nabla^{2}\phi(\mathbf{r})\right] = -k^{2}\,\hat{\phi}(\mathbf{k})$"
          "          "
          r"$\hat{\phi}^{\,t+\Delta t}(\mathbf{k}) = "
          r"\dfrac{\hat{\phi}^{\,t}(\mathbf{k}) + \Delta t\,\hat{R}_{\mathrm{explicit}}(\mathbf{k})}"
-         {1 + \Delta t\, L_{\mathrm{ref}}\,\kappa_{\mathrm{ref}}\, k^{2}}$",
+         r"{1 + \Delta t\, L_{\mathrm{ref}}\,\kappa_{\mathrm{ref}}\, k^{2}}$",
          fontsize=12, fontweight="bold", color="#a00000", ha="center",
          bbox=dict(boxstyle="round,pad=0.5", facecolor="#fff0f0",
                    edgecolor="#d62728", linewidth=1.2))
