@@ -1,5 +1,6 @@
 
 # Schematics and Visualization
+![Image of Grain Architecture](images/twenty_grains.jpg)
 
 ## Phase field Method with FFT schematic (phi represent the twin order parameter)
 
