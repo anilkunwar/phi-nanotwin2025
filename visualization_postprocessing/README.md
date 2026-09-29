@@ -2,6 +2,11 @@
 # Schematics and Visualization
 ![Image of Grain Architecture](images/twenty_grains.jpg)
 
+
+## Visualization of Polycrystalline grains with neper software
+
+[![meaningtowords](https://img.shields.io/badge/ga-v1.0-brightgreen)](https://grain-architecture1.streamlit.app/) (neper software installed in local computer, and so the app only runs in local computer)
+
 ## Phase field Method with FFT schematic (phi represent the twin order parameter)
 
 [![meaningtowords](https://img.shields.io/badge/phifft-v1.0-yellow)](https://phi-fft-schematic1.streamlit.app/) (Schematic image for illustration of phi-fft)
