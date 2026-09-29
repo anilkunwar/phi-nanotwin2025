@@ -3,7 +3,7 @@
 
 ## How to download complete knowledge base of mu of nanotwinned CU from arxiV database
 
-[![continuummodelnt2d](https://img.shields.io/badge/muexplore1-streamlit-yellow)](https:/mu-knowledge-explorer1.streamlit.app/) (csv contains the full text)
+[![continuummodelnt2d](https://img.shields.io/badge/muexplore1-streamlit-yellow)](https://mu-knowledge-explorer1.streamlit.app/) (csv contains the full text)
 
 
 # CSV to JSON FILE CONVERSION
