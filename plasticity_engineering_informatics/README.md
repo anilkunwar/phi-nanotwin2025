@@ -1,4 +1,4 @@
-# Pure FFT-based Semi-Implicit Spectral Phase-Field model . Plasticity properties are recommended by LLM
+# Pure FFT-based Semi-Implicit Spectral Phase-Field model .Plasticity properties are recommended by LLM
 
   Phase-field evolution (Allen-Cahn equations for ϕ, η1, η2) and  Mechanical equilibrium (calculating stress and strain from eigenstrains) are solved using the FFT spectral method.
 
