@@ -1,6 +1,6 @@
 # Phase field method for modeling evolution of nanotwins in FCC matrix
 
-![Image of phinanotwin](images/logophinanotwin.jpg)
+![Image of phinanotwin](images/logo-phinanotwin.jpg)
 
 [![Visualization via Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://nanotwinevolution.streamlit.app/)
 
