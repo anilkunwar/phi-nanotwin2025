@@ -2,7 +2,8 @@
 """
 Headless A/B benchmark that PROVES the dominant confound in the nanotwinned-Cu
 plasticity app, using the REAL compute_yield_stress() and update_plastic_strain()
-obtained verbatim from the r3 - phase field fft code.
+copied verbatim from the uploaded no-AI app (Pasted Content_1795145354109.txt,
+lines 108-131).
 
 What it tests (the analysis's central claim, "confound A"):
   * unit_fix=False  -> h in nm, b in m  -> yield-stress hardening term ~14 Pa
@@ -13,14 +14,15 @@ What it tests (the analysis's central claim, "confound A"):
                        -> eps_p traces a threshold contour -> ZIGZAG / structured
 
 If zigzag (high tv / hf_frac) appears in EVERY row of the unit_fix=True run
-INCLUDING baseline, the cause of error is the sigma_y structure / unit fix, NOT the physics-grounded AI plasticity recommendeer
+INCLUDING baseline, the culprit is the sigma_y structure / unit fix, NOT the AI
 override values. `only rho0` must be byte-identical to baseline (rho0 is inert).
 
-This is a faithful reproduction of the *plasticity* physics; the r3 - phase field fft code app's
+This is a faithful reproduction of the *plasticity* physics; the real app's
 spectral stress solve is replaced by a representative GPa-scale sigma_eq field
 that places the system in the marginal-yielding regime the analysis describes
-(the r3 app reaches GPa-scale local stress via the gamma_tw ~= 0.7
-transformation eigenstrain). The two plasticity functions below are identical to the r3 code, so the confound is exercised on the actual code.
+(the real app reaches GPa-scale local stress via the gamma_tw ~= 0.7
+transformation eigenstrain). The two plasticity functions below are UNMODIFIED
+copies from the real file, so the confound is exercised on the actual code.
 """
 
 import numpy as np
@@ -177,13 +179,25 @@ def run_ab_benchmark(h_nm, sigma_eq, n_steps=100, unit_fix=True):
         frames[name] = res
         sm = _smoothness(res["eps_p_mag"])
         epxy = res["eps_p_xy"]
+        # Saturation metrics: prove *why* unit_fix=False is flat (overstress
+        # saturates at 1.0 everywhere -> sat_frac=1.0) vs unit_fix=True marginal
+        # yielding (sat_frac~0, partial yield_frac).
+        os_f = np.clip((sigma_eq - res["sigma_y"]) /
+                       np.maximum(res["sigma_y"], 1e-9), 0, 1)
         rows.append({
             "scenario": name, "unit_fix": unit_fix,
             "eps_tv": sm["tv"], "eps_hf_frac": sm["hf_frac"], "eps_max": sm["max"],
+            "sat_frac": float(np.mean(os_f >= 1.0)),     # off: 1.0 everywhere
+            "yield_frac": float(np.mean(os_f > 0.0)),
             "sigmay_min_GPa": float(res["sigma_y"].min()) / 1e9,
             "sigmay_max_GPa": float(res["sigma_y"].max()) / 1e9,
             "eps_xy_pos_frac": float(np.mean(epxy > 0)),   # confound-C signature
         })
+    # Delta vs baseline within this unit_fix group: quantifies that the AI
+    # overrides are second-order (|d_hf_vs_base| << the 0.474 unit-fix jump).
+    base_hf = rows[0]["eps_hf_frac"]
+    for r in rows:
+        r["d_hf_vs_base"] = r["eps_hf_frac"] - base_hf
     return pd.DataFrame(rows), frames
 
 
@@ -278,6 +292,23 @@ def _png(fig):
     return buf.getvalue()
 
 
+def _regression_bench():
+    """Five pins that make the confound a number, not a story. Runs a small
+    fixed (N=128, n_steps=40) benchmark so the result is independent of the
+    sidebar's n_steps and stable across redeploys. N is pinned to 128 (not 64)
+    because hf_frac is grid-resolution dependent: at N=64 the coarse frequency
+    grid under-counts high-frequency power (baseline ~0.16) versus the ~0.47
+    the analysis cites at N=128; the >0.3 threshold is calibrated to that."""
+    full, fr, *_ , inert = compute_benchmark(128, 40)
+    off, on = full[~full.unit_fix], full[full.unit_fix]
+    assert inert, "rho0 must be inert"
+    assert off.eps_hf_frac.max() == 0.0, "legacy field must be uniform"
+    assert np.ptp(fr[False]["baseline"]["eps_p_mag"]) < 1e-18, "legacy eps_p not byte-uniform"
+    assert on.loc[on.scenario == "baseline", "eps_hf_frac"].iloc[0] > 0.3, \
+        "unit_fix=True baseline must be structured"
+    assert on.sat_frac.max() < 0.05, "fixed runs must be marginal, not saturated"
+
+
 def st_main():
     st.set_page_config(page_title="nt-Cu A/B benchmark", layout="wide")
     st.title("🧪 Confound-A A/B benchmark — Hall–Petch unit fix")
@@ -285,6 +316,7 @@ def st_main():
                "representative GPa-scale σ_eq. unit_fix=False reproduces the legacy nm/m mismatch.")
     N = st.sidebar.select_slider("Grid N", [64, 128, 256], 128)
     n_steps = st.sidebar.slider("n_steps", 20, 300, 100, 10)
+    run_pins = st.sidebar.checkbox("🧪 Run regression pins")
 
     full, frames_by_fix, h_nm, sigma_eq, rho0_inert = cached_benchmark(N, n_steps)
 
@@ -311,6 +343,13 @@ def st_main():
 
     st.info("Zigzag appears in EVERY unit_fix=True row incl. baseline ⇒ culprit = "
             "σ_y structure / unit fix, not the AI override values.")
+
+    if run_pins:
+        try:
+            _regression_bench()
+            st.success("All benchmark pins passed.")
+        except AssertionError as e:
+            st.error(f"Pin failed: {e}")
 
 
 def main():  # headless CLI, unchanged behaviour, portable OUT
