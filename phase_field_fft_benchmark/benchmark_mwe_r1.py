@@ -29,7 +29,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = "/home/z/my-project/download"
+import os, tempfile
+# Streamlit Cloud runs as adminuser; /home/z does not exist and /mount/src is
+# read-only. /tmp is the only guaranteed-writable location there. BENCH_OUT
+# lets you override locally (e.g. back to /home/z/my-project/download).
+OUT = os.environ.get("BENCH_OUT",
+                     os.path.join(tempfile.gettempdir(), "ntcu_benchmark"))
 
 # ----------------------------------------------------------------------------
 # VERBATIM copies from the uploaded no-AI app (lines 108-131). DO NOT EDIT.
@@ -182,100 +187,156 @@ def run_ab_benchmark(h_nm, sigma_eq, n_steps=100, unit_fix=True):
     return pd.DataFrame(rows), frames
 
 
-def main():
-    import os
-    os.makedirs(OUT, exist_ok=True)
-    N = 128
+# ============================================================================
+# DUAL-MODE DRIVER — headless CLI + Streamlit Cloud
+# ============================================================================
+import streamlit as st
+from io import BytesIO
+
+ORDER = ["baseline", "only mu", "only sigma0", "only m",
+         "only gamma0_dot", "only rho0", "AI all"]
+
+
+def compute_benchmark(N=128, n_steps=100):
     h_nm = build_h_field(N, twin_spacing_nm=20.0)
     sigma_eq = build_sigma_eq(N, peak_GPa=3.0)
-
-    all_rows = []
-    frames_by_fix = {}
+    dfs, frames_by_fix = [], {}
     for fix in (False, True):
-        df, frames = run_ab_benchmark(h_nm, sigma_eq, n_steps=100, unit_fix=fix)
-        all_rows.append(df)
+        df, frames = run_ab_benchmark(h_nm, sigma_eq, n_steps=n_steps, unit_fix=fix)
+        dfs.append(df)
         frames_by_fix[fix] = frames
-        print(f"\n=== unit_fix={fix} ===")
-        print(df.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
+    full = pd.concat(dfs, ignore_index=True)
+    rho0_inert = bool(np.array_equal(
+        frames_by_fix[True]["baseline"]["eps_p_mag"],
+        frames_by_fix[True]["only rho0"]["eps_p_mag"]))
+    return full, frames_by_fix, h_nm, sigma_eq, rho0_inert
 
-    # rho0-inertness assertion (only rho0 must equal baseline byte-for-byte)
-    base = frames_by_fix[True]["baseline"]["eps_p_mag"]
-    only_rho = frames_by_fix[True]["only rho0"]["eps_p_mag"]
-    assert np.array_equal(base, only_rho), "rho0 is NOT inert -- expected byte-identical!"
-    print("\n[OK] only-rho0 == baseline (byte-identical) -> rho0 is confirmed INERT.")
 
-    full = pd.concat(all_rows, ignore_index=True)
-    full.to_csv(f"{OUT}/benchmark_results.csv", index=False)
-    print(f"\nsaved {OUT}/benchmark_results.csv")
+@st.cache_data(show_spinner="Running A/B benchmark (verbatim plasticity)…")
+def cached_benchmark(N, n_steps):
+    return compute_benchmark(N, n_steps)
 
-    # ---- grid plot: 2 rows (off / on) x 7 cols (scenarios) ----
-    order = ["baseline", "only mu", "only sigma0", "only m",
-             "only gamma0_dot", "only rho0", "AI all"]
+
+def fig_grid(frames_by_fix, full):
     fig, axes = plt.subplots(2, 7, figsize=(18, 5.6), constrained_layout=True)
+    vmax = max(full["eps_max"].max(), 1e-30)
     for r, fix in enumerate((False, True)):
         fr = frames_by_fix[fix]
-        for c, name in enumerate(order):
+        for c, name in enumerate(ORDER):
             ax = axes[r, c]
-            im = ax.imshow(fr[name]["eps_p_mag"], origin="lower", cmap="magma",
-                           vmin=0, vmax=max(full["eps_max"].max(), 1e-30))
+            im = ax.imshow(fr[name]["eps_p_mag"], origin="lower",
+                           cmap="magma", vmin=0, vmax=vmax)
             hf = _smoothness(fr[name]["eps_p_mag"])["hf_frac"]
             ax.set_title(f"{name}\nhf_frac={hf:.3f}", fontsize=9)
             ax.set_xticks([]); ax.set_yticks([])
             if c == 0:
                 ax.set_ylabel(f"unit_fix={fix}", fontsize=11)
-    fig.suptitle("Plastic strain |eps_p| -- confound A (Hall-Petch unit fix)\n"
+    fig.suptitle("Plastic strain |eps_p| — confound A (Hall–Petch unit fix)\n"
                  "off (top): smooth everywhere; on (bottom): structured everywhere, incl. baseline",
                  fontsize=12)
     fig.colorbar(im, ax=axes[:, -1], shrink=0.8, label="|eps_p|")
-    fig.savefig(f"{OUT}/benchmark_grid.png", dpi=110)
-    plt.close(fig)
-    print(f"saved {OUT}/benchmark_grid.png")
+    return fig
 
-    # ---- sigma_y flat-vs-structured comparison ----
+
+def fig_sigma_y(h_nm):
     sy_off = compute_yield_stress(h_nm, 50e6, 48e9, 0.256e-9, 0.34)
     sy_on = compute_yield_stress(h_nm * 1e-9, 50e6, 48e9, 0.256e-9, 0.34)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
     im0 = ax[0].imshow(sy_off / 1e6, origin="lower", cmap="viridis")
-    ax[0].set_title(f"sigma_y, unit_fix=False\nrange {sy_off.min()/1e6:.2f}-{sy_off.max()/1e6:.2f} MPa (FLAT)")
+    ax[0].set_title(f"sigma_y, unit_fix=False\n"
+                    f"{sy_off.min()/1e6:.2f}–{sy_off.max()/1e6:.2f} MPa (FLAT)")
     fig.colorbar(im0, ax=ax[0], label="sigma_y [MPa]")
     im1 = ax[1].imshow(sy_on / 1e9, origin="lower", cmap="viridis")
-    ax[1].set_title(f"sigma_y, unit_fix=True\nrange {sy_on.min()/1e9:.2f}-{sy_on.max()/1e9:.2f} GPa (STRUCTURED)")
+    ax[1].set_title(f"sigma_y, unit_fix=True\n"
+                    f"{sy_on.min()/1e9:.2f}–{sy_on.max()/1e9:.2f} GPa (STRUCTURED)")
     fig.colorbar(im1, ax=ax[1], label="sigma_y [GPa]")
-    fig.savefig(f"{OUT}/sigma_y_comparison.png", dpi=110)
-    plt.close(fig)
-    print(f"saved {OUT}/sigma_y_comparison.png")
+    return fig
 
-    # ---- confound C: fixed-sign vs associated flow on eps_p_xy ----
+
+def fig_flow(h_nm, sigma_eq):
+    N = h_nm.shape[0]
     sxx = np.zeros_like(sigma_eq); syy = np.zeros_like(sigma_eq)
-    sxy = sigma_eq * 0.6 * np.sign(np.sin(2 * np.pi * np.arange(N)[:, None] / N * 3))  # sign-changing shear
-    res_fixed = run_solver(h_nm, sigma_eq, dict(BASELINE), n_steps=100, unit_fix=True,
-                           associated_flow=False)
-    res_assoc = run_solver(h_nm, sigma_eq, dict(BASELINE), n_steps=100, unit_fix=True,
-                           associated_flow=True, sxx=sxx, syy=syy, sxy=sxy)
+    sxy = sigma_eq * 0.6 * np.sign(np.sin(2*np.pi*np.arange(N)[:, None]/N*3))
+    rf = run_solver(h_nm, sigma_eq, dict(BASELINE), 100, True, False)
+    ra = run_solver(h_nm, sigma_eq, dict(BASELINE), 100, True, True, sxx, syy, sxy)
+    v = max(np.abs(rf["eps_p_xy"]).max(), np.abs(ra["eps_p_xy"]).max(), 1e-30)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
-    im = ax[0].imshow(res_fixed["eps_p_xy"], origin="lower", cmap="RdBu_r",
-                      vmin=-max(np.abs(res_fixed["eps_p_xy"]).max(), np.abs(res_assoc["eps_p_xy"]).max()),
-                      vmax=max(np.abs(res_fixed["eps_p_xy"]).max(), np.abs(res_assoc["eps_p_xy"]).max()))
-    ax[0].set_title(f"eps_p_xy, fixed-sign flow (legacy)\npos_frac={np.mean(res_fixed['eps_p_xy']>0):.2f} (single-signed -> rectified)")
-    im = ax[1].imshow(res_assoc["eps_p_xy"], origin="lower", cmap="RdBu_r",
-                      vmin=-max(np.abs(res_fixed["eps_p_xy"]).max(), np.abs(res_assoc["eps_p_xy"]).max()),
-                      vmax=max(np.abs(res_fixed["eps_p_xy"]).max(), np.abs(res_assoc["eps_p_xy"]).max()))
-    ax[1].set_title(f"eps_p_xy, associated flow (Snippet 4)\npos_frac={np.mean(res_assoc['eps_p_xy']>0):.2f} (follows sxy sign)")
+    for a, res, ttl in ((ax[0], rf, "fixed-sign flow (legacy)"),
+                        (ax[1], ra, "associated flow (Snippet 4)")):
+        im = a.imshow(res["eps_p_xy"], origin="lower", cmap="RdBu_r", vmin=-v, vmax=v)
+        a.set_title(f"eps_p_xy, {ttl}\npos_frac={np.mean(res['eps_p_xy']>0):.2f}")
     fig.colorbar(im, ax=ax, shrink=0.8, label="eps_p_xy")
-    fig.suptitle("Confound C: fixed-sign d_xy = +0.5*stress_dev rectifies the pattern", fontsize=12)
-    fig.savefig(f"{OUT}/associated_flow_comparison.png", dpi=110)
-    plt.close(fig)
-    print(f"saved {OUT}/associated_flow_comparison.png")
+    fig.suptitle("Confound C: fixed-sign d_xy = +0.5·stress_dev rectifies the pattern",
+                 fontsize=12)
+    return fig
 
-    # ---- headline numbers ----
-    off = all_rows[0]; on = all_rows[1]
-    print("\n=== HEADLINE ===")
-    print(f"unit_fix=False : mean hf_frac = {off['eps_hf_frac'].mean():.4g}  (smooth)")
-    print(f"unit_fix=True  : mean hf_frac = {on['eps_hf_frac'].mean():.4g}  (structured)")
-    print(f"baseline hf_frac: off={off.loc[off.scenario=='baseline','eps_hf_frac'].iloc[0]:.4g}"
-          f"  on={on.loc[on.scenario=='baseline','eps_hf_frac'].iloc[0]:.4g}")
-    print("=> zigzag appears in EVERY unit_fix=True row incl. baseline => culprit = sigma_y structure / unit fix.")
+
+def _png(fig):
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def st_main():
+    st.set_page_config(page_title="nt-Cu A/B benchmark", layout="wide")
+    st.title("🧪 Confound-A A/B benchmark — Hall–Petch unit fix")
+    st.caption("Verbatim compute_yield_stress() / update_plastic_strain() from the r3 app; "
+               "representative GPa-scale σ_eq. unit_fix=False reproduces the legacy nm/m mismatch.")
+    N = st.sidebar.select_slider("Grid N", [64, 128, 256], 128)
+    n_steps = st.sidebar.slider("n_steps", 20, 300, 100, 10)
+
+    full, frames_by_fix, h_nm, sigma_eq, rho0_inert = cached_benchmark(N, n_steps)
+
+    off = full[~full.unit_fix]; on = full[full.unit_fix]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("mean hf_frac · unit_fix=False", f"{off.eps_hf_frac.mean():.4g}")
+    c2.metric("mean hf_frac · unit_fix=True",  f"{on.eps_hf_frac.mean():.4g}")
+    c3.metric("baseline hf_frac off → on",
+              f"{off.loc[off.scenario=='baseline','eps_hf_frac'].iloc[0]:.4g} → "
+              f"{on.loc[on.scenario=='baseline','eps_hf_frac'].iloc[0]:.4g}")
+    (st.success if rho0_inert else st.error)(
+        "only-rho0 == baseline (byte-identical) → ρ₀ confirmed INERT."
+        if rho0_inert else "ρ₀ is NOT inert — investigate!")
+
+    st.dataframe(full, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ benchmark_results.csv",
+                       full.to_csv(index=False).encode(), "benchmark_results.csv")
+
+    f1, f2, f3 = fig_grid(frames_by_fix, full), fig_sigma_y(h_nm), fig_flow(h_nm, sigma_eq)
+    for fig, name in ((f1, "benchmark_grid"), (f2, "sigma_y_comparison"),
+                      (f3, "associated_flow_comparison")):
+        st.pyplot(fig)
+        st.download_button(f"⬇️ {name}.png", _png(fig), f"{name}.png", key=name)
+
+    st.info("Zigzag appears in EVERY unit_fix=True row incl. baseline ⇒ culprit = "
+            "σ_y structure / unit fix, not the AI override values.")
+
+
+def main():  # headless CLI, unchanged behaviour, portable OUT
+    os.makedirs(OUT, exist_ok=True)
+    full, frames_by_fix, h_nm, sigma_eq, rho0_inert = compute_benchmark(128, 100)
+    assert rho0_inert, "rho0 is NOT inert -- expected byte-identical!"
+    print(full.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
+    full.to_csv(f"{OUT}/benchmark_results.csv", index=False)
+    for fig, name in ((fig_grid(frames_by_fix, full), "benchmark_grid"),
+                      (fig_sigma_y(h_nm), "sigma_y_comparison"),
+                      (fig_flow(h_nm, sigma_eq), "associated_flow_comparison")):
+        fig.savefig(f"{OUT}/{name}.png", dpi=110)
+        plt.close(fig)
+    print(f"saved CSV + 3 PNGs to {OUT}")
+
+
+def _in_streamlit():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":
-    main()
+    if _in_streamlit():
+        st_main()
+    else:
+        main()
