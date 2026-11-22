@@ -427,6 +427,25 @@ def update_plastic_strain(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
     return eps_p_xx_new, eps_p_yy_new, eps_p_xy_new
 
 
+def update_plastic_strain_associated(sigma_eq, sigma_y, sxx, syy, sxy,
+                                     eps_p_xx, eps_p_yy, eps_p_xy,
+                                     gamma0_dot, m, dt):
+    """Associated (normality) flow rule: plastic-flow direction follows
+    the actual deviatoric stress tensor (File 1 parity toggle).
+
+    Activated via ``params["associated_flow"] == True``.  When OFF,
+    the solver falls back to ``update_plastic_strain`` — the fixed-sign
+    (xx+, yy-, xy+) flow rule used by File 1's default behavior."""
+    os_ = np.clip(np.maximum(sigma_eq - sigma_y, 0.0) / np.maximum(sigma_y, 1e-9), 0, 1)
+    inc = np.minimum(1.5 * gamma0_dot * os_**m * dt, 1e-3)
+    p = (sxx + syy) / 2.0
+    dx_, dy_, dxy_ = sxx - p, syy - p, sxy
+    nrm = np.sqrt(dx_**2 + dy_**2 + 2.0 * dxy_**2 + 1e-30)
+    return (np.clip(eps_p_xx + inc * dx_ / nrm, -.1, .1),
+            np.clip(eps_p_yy + inc * dy_ / nrm, -.1, .1),
+            np.clip(eps_p_xy + inc * dxy_ / nrm, -.1, .1))
+
+
 # ============================================================================
 # METADATA MANAGEMENT
 # ============================================================================
@@ -4544,7 +4563,15 @@ class NanotwinnedCuSolver:
         gamma_aniso = float(params.get('gamma_aniso', 0.7))
         L_CTB = float(params.get('L_CTB', 0.05))
         L_ITB = float(params.get('L_ITB', 5.0))
-        self.implicit_diff_phi = L_ITB * kappa0 * (1.0 + gamma_aniso)
+        # ── File 1 parity: stabilizer toggle ─────────────────────────
+        # ON  (parity_stabilizer=True)  → strong ITB-based implicit
+        #     diffusion L_ITB·κ₀·(1+γ_aniso)  [File 2 v10 default]
+        # OFF (parity_stabilizer=False) → weak CTB-only implicit
+        #     diffusion L_CTB·κ₀          [File 1 default behavior]
+        if params.get("parity_stabilizer", False):
+            self.implicit_diff_phi = L_ITB * kappa0 * (1.0 + gamma_aniso)
+        else:
+            self.implicit_diff_phi = L_CTB * kappa0
         kappa_eta = float(params.get('kappa_eta', 2.0))
         L_eta = float(params.get('L_eta', 1.0))
         self.implicit_diff_eta = L_eta * kappa_eta
@@ -4674,15 +4701,27 @@ class NanotwinnedCuSolver:
         return eta1_new, eta2_new
 
     @handle_errors
-    def compute_plastic_strain(self, sigma_eq, sigma_y):
+    def compute_plastic_strain(self, sigma_eq, sigma_y, sxx, syy, sxy):
         try:
             plastic_params = self.mat_props['plasticity']
             gamma0_dot = plastic_params['gamma0_dot']
             m = int(plastic_params['m'])
-            eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain(
-                sigma_eq, sigma_y,
-                self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
-                gamma0_dot, m, self.dt)
+            # ── File 1 parity: associated flow toggle ────────────────────
+            # ON  (associated_flow=True)  → associated (normality) flow
+            #     rule: plastic-flow direction follows the actual
+            #     deviatoric stress tensor.  [File 2 v10 default]
+            # OFF (associated_flow=False) → fixed-sign flow rule
+            #     (xx+, yy-, xy+) of File 1's default behavior.
+            if self.params.get("associated_flow", False):
+                eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain_associated(
+                    sigma_eq, sigma_y, sxx, syy, sxy,
+                    self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
+                    gamma0_dot, m, self.dt)
+            else:
+                eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain(
+                    sigma_eq, sigma_y,
+                    self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
+                    gamma0_dot, m, self.dt)
             self.eps_p_xx = eps_p_xx_new
             self.eps_p_yy = eps_p_yy_new
             self.eps_p_xy = eps_p_xy_new
@@ -4754,18 +4793,18 @@ class NanotwinnedCuSolver:
             h = compute_twin_spacing_from_gradient(phi_gx, phi_gy)
 
             plastic_params = self.mat_props['plasticity']
-            # ── v10.0.0 FIX ─────────────────────────────────────────────
-            # `h` is returned by compute_twin_spacing_from_gradient in nm
-            # (because kx is in 1/nm), but `b` is stored in metres.
-            # Passing h directly made the Hall–Petch term evaluate to a
-            # few Pa instead of ~100 MPa — i.e. effectively inert.  We
-            # convert h → metres here so the units are consistent.
-            h_m = h * 1e-9
+            # ── File 1 parity: Hall–Petch unit fix toggle ────────────────
+            # ON  (hall_petch_units_fix=True) → h (nm) converted to metres
+            #     so the Hall–Petch term evaluates correctly (~100 MPa).
+            #     [File 2 v10.0.0 default]
+            # OFF (hall_petch_units_fix=False) → h passed unchanged, leaving
+            #     the HP term effectively inert.  [File 1 default behavior]
+            h_m = h * 1e-9 if self.params.get("hall_petch_units_fix", False) else h
             sigma_y = compute_yield_stress(
                 h_m, plastic_params['sigma0'], plastic_params['mu'],
                 plastic_params['b'], plastic_params['nu'])
 
-            eps_p_mag = self.compute_plastic_strain(sigma_eq, sigma_y)
+            eps_p_mag = self.compute_plastic_strain(sigma_eq, sigma_y, sxx, syy, sxy)
 
             self.phi = self.evolve_twin_field(sxx, syy, sxy, eps_p_mag)
             self.eta1, self.eta2 = self.evolve_grain_fields()
@@ -9261,6 +9300,28 @@ def main():
                                              key="scalebar_color")
             scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1,
                                           key="scalebar_fontsize")
+            with st.expander("🎛️ Parity switches (File 1 compatibility)", expanded=False):
+                st.caption("Defaults = File 1 (no-AI) behaviour. "
+                           "Toggle ON to match File 2 (AI recommender) "
+                           "v10.0.0 physics fixes.")
+                st.checkbox("A · Hall–Petch unit fix (h×1e-9)",
+                            value=False, key="hall_petch_units_fix",
+                            help=("ON: convert twin spacing h from nm to m "
+                                  "before Hall–Petch (File 2 v10 default). "
+                                  "OFF: pass h unchanged — HP term inert "
+                                  "(File 1 default)."))
+                st.checkbox("D · Strong stabilizer (L_ITB·κ₀·(1+γ_aniso))",
+                            value=False, key="parity_stabilizer",
+                            help=("ON: implicit diffusion uses the strong "
+                                  "ITB-based stabilizer (File 2 v10 "
+                                  "default).  OFF: weak CTB-only stabilizer "
+                                  "L_CTB·κ₀ (File 1 default)."))
+                st.checkbox("C · Associated (normality) flow rule",
+                            value=False, key="associated_flow",
+                            help=("ON: plastic-flow direction follows the "
+                                  "actual deviatoric stress tensor "
+                                  "(File 2 v10 default).  OFF: fixed-sign "
+                                  "flow rule (File 1 default)."))
             if st.button("🚀 Initialize Simulation", type="primary",
                          use_container_width=True):
                 params = {
@@ -9290,7 +9351,10 @@ def main():
                     'global_cmap_stress': global_cmap_stress,
                     'global_cmap_hydro': global_cmap_hydro,
                     'scalebar_color': scalebar_color,
-                    'scalebar_fontsize': scalebar_fontsize}
+                    'scalebar_fontsize': scalebar_fontsize,
+                    'hall_petch_units_fix': st.session_state.get('hall_petch_units_fix', False),
+                    'parity_stabilizer': st.session_state.get('parity_stabilizer', False),
+                    'associated_flow': st.session_state.get('associated_flow', False)}
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
                     params['defect_pos'] = (defect_x, defect_y)
