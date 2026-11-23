@@ -1385,7 +1385,7 @@ def render_colormap_preview(cmap_name: str, reverse: bool = False,
                 ha='right', va='center', fontsize=7)
         ax.text(1.01, 0.5, 'high', transform=ax.transAxes,
                 ha='left', va='center', fontsize=7)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
     except Exception:
         st.caption(f"_(preview unavailable for `{cmap_name}`)_")
@@ -1663,7 +1663,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
                    else len(JOURNAL_PRESETS_SIM)),
             key=f"{key_prefix}_preset")
         if st.button("Apply preset", key=f"{key_prefix}_apply_preset",
-                     use_container_width=True):
+                     width="stretch"):
             _apply_journal_preset(style, preset_display)
             st.rerun()
     with pcol2:
@@ -1680,7 +1680,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
     with pcol3:
         st.markdown("**Reset**")
         if st.button("Reset all", key=f"{key_prefix}_reset",
-                     use_container_width=True):
+                     width="stretch"):
             st.session_state.sim_style = SimulationVisualStyle()
             st.rerun()
 
@@ -1696,7 +1696,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
             style.font_weight_title = st.selectbox(
                 "Title weight", ['normal', 'bold'],
                 index=1 if style.font_weight_title == 'bold' else 0,
-                key=f"{key_prefix}_fw")
+                key=f"{key_prefix}_fwt")
         with f2:
             fs1, fs2, fs3 = st.columns(3)
             with fs1:
@@ -1942,7 +1942,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
                          key=f"{key_prefix}_plo")
         hi_p = st.slider("Auto percentile high", 80.0, 100.0,
                          float(style.field_vpercentile_hi), 0.5,
-                         key=f"{key_prefix}_phi")
+                         key=f"{key_prefix}_p_hi")
         style.field_vpercentile_lo = lo_p
         style.field_vpercentile_hi = hi_p
         lock_field = st.selectbox(
@@ -2760,14 +2760,7 @@ def render_candidate_score_chart(param_key, candidates, scores, provenance,
                 pad_inches=0.05)
     plt.close(fig)
     screen.seek(0)
-    try:
-        _ver = tuple(int(x) for x in st.__version__.split('.')[:2])
-    except Exception:
-        _ver = (0, 0)
-    if _ver >= (1, 46):
-        st.image(screen, width='stretch')
-    else:
-        st.image(screen, use_container_width=True)
+    st.image(screen, width="stretch")
     st.download_button(f'Download {hires_dpi}-dpi PNG', data=hires.getvalue(),
                        file_name=f'latentmoe_{param_key}{key_suffix}.png',
                        mime='image/png')
@@ -8179,7 +8172,7 @@ def render_plasticity_candidate_histograms(
         margin=dict(l=40, r=20, t=60, b=40),
         paper_bgcolor="#ffffff", plot_bgcolor="#f8f9fa",
         font=dict(color="#1e293b"), bargap=0.08)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 @dataclass
@@ -8918,7 +8911,7 @@ def _plr_render_parameter_selector(param: str,
                 })
             if ctx_rows:
                 st.dataframe(pd.DataFrame(ctx_rows),
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
 
     st.session_state[f"{_PLR}{param}_value_si"] = value_si
     st.markdown("---")
@@ -9128,12 +9121,12 @@ def render_plasticity_recommender_sidebar(
     btn1, btn2, btn3 = st.columns(3)
     with btn1:
         run_btn = st.button("🔍 Analyse JSON databases",
-                            use_container_width=True, type="primary")
+                            width="stretch", type="primary")
     with btn2:
         refresh_btn = st.button("🔄 Force reload corpus",
-                                use_container_width=True)
+                                width="stretch")
     with btn3:
-        if st.button("♻️ Reset recommendations", use_container_width=True):
+        if st.button("♻️ Reset recommendations", width="stretch"):
             _plr_reset(); st.rerun()
 
     if refresh_btn:
@@ -9236,7 +9229,7 @@ def render_plasticity_recommender_sidebar(
         _plr_render_parameter_selector(param, bundle)
 
     if st.button("✅ Apply selected values to solver",
-                 type="primary", use_container_width=True):
+                 type="primary", width="stretch"):
         overrides = {}
         for param in PARAM_ORDER:
             v = st.session_state.get(f"{_PLR}{param}_value_si")
@@ -9255,7 +9248,7 @@ def render_plasticity_recommender_sidebar(
         for col in ["mean", "median", "std", "p10", "p90"]:
             if col in styled.columns:
                 styled[col] = styled.apply(lambda r, c=col: f"{r[c]:.3e}", axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
 
 
 # ============================================================================
@@ -9320,7 +9313,7 @@ def render_friction_stress_lab():
         **{'τ_P (MPa)': '—' if r.tau_P_MPa is None else f'{r.tau_P_MPa:.3g}'},
         Conf=f'{r.conf:.2f}', Status=r.status, Note=r.note)
         for r in routes]),
-        use_container_width=True, hide_index=True)
+        width="stretch", hide_index=True)
 
     if not cons:
         st.error('No viable route — check missing inputs above.')
@@ -9675,7 +9668,7 @@ def render_recommender_radar_pub(bundle, style):
         width=int(style.figure_width * 90))
     style.apply_plotly_layout(
         fig, title=f"AI Recommendation vs Defaults — {bundle.material}")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     if style.show_values:
         with st.expander("📊 Normalized radar values", expanded=False):
             df = pd.DataFrame({
@@ -9685,7 +9678,7 @@ def render_recommender_radar_pub(bundle, style):
                 'AI (norm)': bests_norm,
                 'AI (actual)': [_pl_fmt(p, v)
                                 for p, v in zip(PARAM_ORDER, best_values)]})
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
     return _fig_to_bytes_plotly(fig)
 
 
@@ -9854,7 +9847,7 @@ def render_recommender_bars_pub(bundle, style):
                 fig_prev, ax_prev = plt.subplots(figsize=(5, 0.4), dpi=100)
                 ax_prev.imshow(gradient, aspect='auto', cmap=cmap_preview)
                 ax_prev.set_axis_off()
-                st.pyplot(fig_prev, use_container_width=True)
+                st.pyplot(fig_prev, width="stretch")
                 plt.close(fig_prev)
             except Exception:
                 pass
@@ -9979,7 +9972,7 @@ def render_recommender_bars_pub(bundle, style):
                ("🖤 Classic", 'Greys', 'uniform')]
     for col, (name, cmap_name, mode_name) in zip(preset_cols, presets):
         with col:
-            if st.button(name, use_container_width=True,
+            if st.button(name, width="stretch",
                          key=f"rec_bar_preset_{name}"):
                 st.session_state[_BAR_PRESET_PENDING_KEY] = {
                     "cmap": cmap_name, "mode": mode_name}
@@ -10088,7 +10081,7 @@ def render_recommender_sankey_pub(bundle, style):
     style.apply_plotly_layout(fig, title="Plasticity Parameter Source Flow (Sankey)")
     fig.update_layout(height=int(style.figure_height * 100),
                       width=int(style.figure_width * 100))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     return _fig_to_bytes_plotly(fig)
 
 
@@ -10132,7 +10125,7 @@ def render_recommender_treemap_pub(bundle, style):
     style.apply_plotly_layout(fig, title="Candidate Hierarchy Treemap (sized by score)")
     fig.update_layout(height=int(style.figure_height * 100),
                       width=int(style.figure_width * 100))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     return _fig_to_bytes_plotly(fig)
 
 
@@ -10326,7 +10319,7 @@ def render_recommender_style_controls() -> RecommenderVisualStyle:
             fig_prev, ax_prev = plt.subplots(figsize=(6, 0.45), dpi=120)
             ax_prev.imshow(gradient, aspect='auto', cmap=cmap)
             ax_prev.set_axis_off()
-            st.pyplot(fig_prev, use_container_width=True)
+            st.pyplot(fig_prev, width="stretch")
             plt.close(fig_prev)
         except Exception:
             pass
@@ -10505,7 +10498,7 @@ def render_recommender_visuals_dashboard():
                 file_name=(f"recommender_"
                            f"{chart_type.lower().replace(' ', '_')}_"
                            f"{bundle.material}_{int(style.dpi)}dpi.png"),
-                mime="image/png", use_container_width=True)
+                mime="image/png", width="stretch")
 
 
 # ============================================================================
@@ -10741,7 +10734,7 @@ def main():
                                   "(File 2 v10 default).  OFF: fixed-sign "
                                   "flow rule (File 1 default)."))
             if st.button("🚀 Initialize Simulation", type="primary",
-                         use_container_width=True):
+                         width="stretch"):
                 params = {
                     'material': material_choice,
                     'N': N, 'dx': dx, 'dt': dt,
@@ -11012,7 +11005,7 @@ def main():
                 fig.update_layout(title=f"{field} Line Profiles Comparison",
                                   xaxis_title="Position (nm)", yaxis_title=ylabel,
                                   hovermode='x unified', template="plotly_white")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             elif config['type'] == "Statistical Summary":
                 data = []
                 for sim in simulations:
@@ -11041,7 +11034,7 @@ def main():
                     fig.update_layout(title="Stress Comparison",
                                       xaxis_title="Simulation",
                                       yaxis_title="Stress (GPa)")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
                 else:
                     st.warning("No convergence data available.")
             elif config['type'] == "Evolution Timeline":
@@ -11067,7 +11060,7 @@ def main():
                 fig.update_layout(title=f"{chosen_metric} Evolution Comparison",
                                   xaxis_title="Time (ns)", yaxis_title=chosen_metric,
                                   hovermode='x unified', template="plotly_white")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     elif operation_mode == "Single Simulation View" and \
          'selected_sim_id' in st.session_state:
@@ -11156,7 +11149,7 @@ def main():
                         + ", ".join(f"`{k}={v:.3g}`"
                                     for k, v in _active_overrides.items()))
             if st.button("▶️ Start Evolution", type="secondary",
-                         use_container_width=True):
+                         width="stretch"):
                 with st.spinner("Running phase-field simulation (FFT)..."):
                     try:
                         solver = NanotwinnedCuSolver(params)
@@ -11294,7 +11287,7 @@ def main():
                 fig_heatmap = visualizer.create_plotly_heatmap(
                     results, plotly_field, frame_idx_plotly)
                 if fig_heatmap:
-                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                    st.plotly_chart(fig_heatmap, width="stretch")
                 st.markdown("---")
                 st.subheader("Interactive Line Profiles")
                 col1, col2 = st.columns(2)
@@ -11314,7 +11307,7 @@ def main():
                                                        "horizontal")
                 fig_line = visualizer.create_plotly_line_profiles(
                     results, plotly_field, [internal_pt], position_ratio_plotly)
-                st.plotly_chart(fig_line, use_container_width=True)
+                st.plotly_chart(fig_line, width="stretch")
             else:
                 st.info("Run a simulation first.")
         with tabs[5]:
@@ -11335,7 +11328,7 @@ def main():
                 fig_3d = visualizer.create_plotly_3d_surface(
                     results, field_3d, frame_idx_3d)
                 if fig_3d:
-                    st.plotly_chart(fig_3d, use_container_width=True)
+                    st.plotly_chart(fig_3d, width="stretch")
             else:
                 st.info("Run a simulation first.")
         with tabs[6]:
