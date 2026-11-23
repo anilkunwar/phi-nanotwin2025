@@ -410,20 +410,7 @@ def compute_yield_stress(h, sigma0, mu, b, nu):
 
 
 def update_plastic_strain(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
-                          gamma0_dot, m, dt,
-                          sxx=None, syy=None, sxy=None, associated_flow=False):
-    """Plastic strain increment.
-
-    Fixes vs. the legacy version:
-      * `m` is now passed as a float (see compute_plastic_strain) so a
-        sub-unity rate-sensitivity exponent is no longer truncated to 0;
-      * `d_xy` is no longer hard-coded to `+0.5*stress_dev` (which rectifies
-        shear strain to one sign every step and breaks mirror symmetry).
-        When `associated_flow=True` and the deviatoric stresses sxx/syy/sxy
-        are supplied, the increment is projected along the deviatoric stress
-        direction (normality rule), so its sign tracks sxy.  When False the
-        legacy fixed-sign rule is kept for backward comparison.
-    """
+                          gamma0_dot, m, dt):
     MAX_OVERSTRESS = 1.0
     MAX_PLASTIC_STRAIN = 0.1
     overstress = np.maximum(sigma_eq - sigma_y, 0.0) / np.maximum(sigma_y, 1e-9)
@@ -431,25 +418,32 @@ def update_plastic_strain(sigma_eq, sigma_y, eps_p_xx, eps_p_yy, eps_p_xy,
     gamma_dot = gamma0_dot * overstress**m
     stress_dev = 2.0 / 3.0 * gamma_dot * dt
     stress_dev = np.minimum(stress_dev, 0.001)
-    if associated_flow and sxx is not None and syy is not None and sxy is not None:
-        # Normality rule: d_p ∝ s_dev / |s_dev|, sign tracks the resolved shear.
-        p = 0.5 * (sxx + syy)
-        sx_dev = sxx - p
-        sy_dev = syy - p
-        sxy_dev = sxy
-        nrm = np.sqrt(sx_dev**2 + sy_dev**2 + 2.0 * sxy_dev**2 + 1e-30)
-        d_xx = stress_dev * sx_dev / nrm
-        d_yy = stress_dev * sy_dev / nrm
-        d_xy = stress_dev * sxy_dev / nrm
-    else:
-        # Legacy fixed-sign rule (kept for A/B comparison; breaks symmetry).
-        d_xx = stress_dev
-        d_yy = -0.5 * stress_dev
-        d_xy = 0.5 * stress_dev
+    d_xx = stress_dev
+    d_yy = -0.5 * stress_dev
+    d_xy = 0.5 * stress_dev
     eps_p_xx_new = np.clip(eps_p_xx + d_xx, -MAX_PLASTIC_STRAIN, MAX_PLASTIC_STRAIN)
     eps_p_yy_new = np.clip(eps_p_yy + d_yy, -MAX_PLASTIC_STRAIN, MAX_PLASTIC_STRAIN)
     eps_p_xy_new = np.clip(eps_p_xy + d_xy, -MAX_PLASTIC_STRAIN, MAX_PLASTIC_STRAIN)
     return eps_p_xx_new, eps_p_yy_new, eps_p_xy_new
+
+
+def update_plastic_strain_associated(sigma_eq, sigma_y, sxx, syy, sxy,
+                                     eps_p_xx, eps_p_yy, eps_p_xy,
+                                     gamma0_dot, m, dt):
+    """Associated (normality) flow rule: plastic-flow direction follows
+    the actual deviatoric stress tensor (File 1 parity toggle).
+
+    Activated via ``params["associated_flow"] == True``.  When OFF,
+    the solver falls back to ``update_plastic_strain`` — the fixed-sign
+    (xx+, yy-, xy+) flow rule used by File 1's default behavior."""
+    os_ = np.clip(np.maximum(sigma_eq - sigma_y, 0.0) / np.maximum(sigma_y, 1e-9), 0, 1)
+    inc = np.minimum(1.5 * gamma0_dot * os_**m * dt, 1e-3)
+    p = (sxx + syy) / 2.0
+    dx_, dy_, dxy_ = sxx - p, syy - p, sxy
+    nrm = np.sqrt(dx_**2 + dy_**2 + 2.0 * dxy_**2 + 1e-30)
+    return (np.clip(eps_p_xx + inc * dx_ / nrm, -.1, .1),
+            np.clip(eps_p_yy + inc * dy_ / nrm, -.1, .1),
+            np.clip(eps_p_xy + inc * dxy_ / nrm, -.1, .1))
 
 
 # ============================================================================
@@ -3389,59 +3383,16 @@ def parse_llm_json(raw: str) -> list:
         return []
 
 
-def ollama_is_available(host="http://localhost:11434", timeout=2.0):
-    """Cheap reachability probe. Returns True iff Ollama answers /api/tags."""
-    if not REQUESTS_AVAILABLE:
-        return False
-    try:
-        r = _requests.get(f"{host.rstrip('/')}/api/tags", timeout=timeout)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
 def ollama_extract(prompt, model="qwen2.5:7b", host="http://localhost:11434",
-                   timeout=60, max_retries=2):
-    """Hardened Ollama call.
-
-    Fixes the connectivity issue in the original implementation:
-      * gates on `ollama_is_available()` first so a dead host fails fast
-        (~2 s) instead of burning the full per-call timeout on every Tier;
-      * retries with linear back-off on ConnectionError / Timeout / 5xx;
-      * raises only `RuntimeError("requests not installed")` if the library
-        is missing, otherwise returns "" on any network failure so the
-        Tier-1/3 callers degrade to the heuristic fallback instead of
-        killing the Streamlit run.
-    """
+                   timeout=120):
     if not REQUESTS_AVAILABLE:
         raise RuntimeError("requests not installed")
-    host = host.rstrip("/")
-    if not ollama_is_available(host):
-        logger.warning("ollama_extract: host %s unreachable — skipping LLM call", host)
-        return ""
-    payload = {"model": model, "prompt": prompt, "stream": False,
-               "options": {"temperature": 0}}
-    last_exc = None
-    for attempt in range(max_retries + 1):
-        try:
-            r = _requests.post(f"{host}/api/generate", json=payload, timeout=timeout)
-            if r.status_code >= 500:
-                raise _requests.HTTPError(f"Ollama {r.status_code}", response=r)
-            r.raise_for_status()
-            return r.json().get("response", "")
-        except _requests.exceptions.JSONDecodeError as e:
-            logger.warning("ollama_extract: non-JSON Ollama body (attempt %d)", attempt + 1)
-            return ""
-        except Exception as e:
-            last_exc = e
-            kind = type(e).__name__
-            logger.warning("ollama_extract attempt %d/%d failed [%s]: %s",
-                           attempt + 1, max_retries + 1, kind, e)
-            if attempt < max_retries:
-                time.sleep(0.75 * (attempt + 1))
-    logger.error("ollama_extract: giving up after %d attempts (%s)",
-                 max_retries + 1, last_exc)
-    return ""
+    r = _requests.post(f"{host}/api/generate",
+                       json={"model": model, "prompt": prompt, "stream": False,
+                             "options": {"temperature": 0}},
+                       timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("response", "")
 
 
 @dataclass
@@ -4574,21 +4525,15 @@ class NanotwinnedCuSolver:
 
         material_name = params.get('material', 'Cu')
         self.mat_props = MaterialProperties.get_material(material_name)
-        # FIX: do not mutate the caller's params dict — assign on the solver only.
-        self.material_name = material_name
+        self.params['material'] = material_name
 
-        # Validate BEFORE applying overrides so invalid input is rejected first.
+        apply_plasticity_overrides(self)
+
         errors, warnings_list = MaterialProperties.validate_parameters(params)
         if errors:
             raise ValueError(f"Parameter validation failed: {', '.join(errors)}")
         if warnings_list:
-            # Defer UI surface to the caller via a flag; __init__ must stay
-            # side-effect-free so it can run in batch/sweep contexts.
-            self.param_warnings = warnings_list
-        else:
-            self.param_warnings = []
-
-        apply_plasticity_overrides(self)
+            st.warning(f"Parameter warnings: {', '.join(warnings_list)}")
 
         self.geom_viz = InitialGeometryVisualizer(self.N, self.dx)
         self.kx, self.ky, self.k2 = make_k_vectors(self.N, self.dx)
@@ -4596,7 +4541,7 @@ class NanotwinnedCuSolver:
         try:
             self.phi, self.eta1, self.eta2 = self.initialize_fields()
         except Exception as e:
-            logger.error("Failed to initialize fields: %s", e)
+            st.error(f"Failed to initialize fields: {e}")
             self.phi = np.zeros((self.N, self.N))
             self.eta1 = np.zeros((self.N, self.N))
             self.eta2 = np.zeros((self.N, self.N))
@@ -4618,10 +4563,12 @@ class NanotwinnedCuSolver:
         gamma_aniso = float(params.get('gamma_aniso', 0.7))
         L_CTB = float(params.get('L_CTB', 0.05))
         L_ITB = float(params.get('L_ITB', 5.0))
-        # FIX: parity switch for the semi-implicit stabilizer (Confound D).
-        #   parity_stabilizer=True  → L_ITB*kappa0*(1+gamma_aniso)  (AI build)
-        #   parity_stabilizer=False → L_CTB*kappa0                   (legacy)
-        if params.get('parity_stabilizer', True):
+        # ── File 1 parity: stabilizer toggle ─────────────────────────
+        # ON  (parity_stabilizer=True)  → strong ITB-based implicit
+        #     diffusion L_ITB·κ₀·(1+γ_aniso)  [File 2 v10 default]
+        # OFF (parity_stabilizer=False) → weak CTB-only implicit
+        #     diffusion L_CTB·κ₀          [File 1 default behavior]
+        if params.get("parity_stabilizer", False):
             self.implicit_diff_phi = L_ITB * kappa0 * (1.0 + gamma_aniso)
         else:
             self.implicit_diff_phi = L_CTB * kappa0
@@ -4630,10 +4577,6 @@ class NanotwinnedCuSolver:
         self.implicit_diff_eta = L_eta * kappa_eta
 
         self.confine_twin = params.get('confine_twin', True)
-        # FIX: collect runtime errors here instead of calling st.error from
-        # inside solver methods (which breaks batch/sweep/test contexts).
-        self.step_errors: List[str] = []
-        self.param_warnings: List[str] = []
 
     @handle_errors
     def initialize_fields(self):
@@ -4688,7 +4631,7 @@ class NanotwinnedCuSolver:
                            2 * sxy * deps_xy_dphi)
             return df_el_dphi
         except Exception as e:
-            logger.error("Error computing elastic driving force: %s", e)
+            st.error(f"Error computing elastic driving force: {e}")
             return np.zeros_like(self.phi)
 
     @handle_errors
@@ -4758,20 +4701,27 @@ class NanotwinnedCuSolver:
         return eta1_new, eta2_new
 
     @handle_errors
-    def compute_plastic_strain(self, sigma_eq, sigma_y, sxx=None, syy=None, sxy=None):
+    def compute_plastic_strain(self, sigma_eq, sigma_y, sxx, syy, sxy):
         try:
             plastic_params = self.mat_props['plasticity']
             gamma0_dot = plastic_params['gamma0_dot']
-            # FIX: float(), not int() — int() silently truncates a sub-unity
-            # rate-sensitivity exponent to 0, making the flow rate-insensitive.
-            m = float(plastic_params['m'])
-            associated_flow = bool(self.params.get('associated_flow', False))
-            eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain(
-                sigma_eq, sigma_y,
-                self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
-                gamma0_dot, m, self.dt,
-                sxx=sxx, syy=syy, sxy=sxy,
-                associated_flow=associated_flow)
+            m = int(plastic_params['m'])
+            # ── File 1 parity: associated flow toggle ────────────────────
+            # ON  (associated_flow=True)  → associated (normality) flow
+            #     rule: plastic-flow direction follows the actual
+            #     deviatoric stress tensor.  [File 2 v10 default]
+            # OFF (associated_flow=False) → fixed-sign flow rule
+            #     (xx+, yy-, xy+) of File 1's default behavior.
+            if self.params.get("associated_flow", False):
+                eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain_associated(
+                    sigma_eq, sigma_y, sxx, syy, sxy,
+                    self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
+                    gamma0_dot, m, self.dt)
+            else:
+                eps_p_xx_new, eps_p_yy_new, eps_p_xy_new = update_plastic_strain(
+                    sigma_eq, sigma_y,
+                    self.eps_p_xx, self.eps_p_yy, self.eps_p_xy,
+                    gamma0_dot, m, self.dt)
             self.eps_p_xx = eps_p_xx_new
             self.eps_p_yy = eps_p_yy_new
             self.eps_p_xy = eps_p_xy_new
@@ -4779,14 +4729,11 @@ class NanotwinnedCuSolver:
                 2 / 3 * (self.eps_p_xx**2 + self.eps_p_yy**2 +
                          2 * self.eps_p_xy**2 + 1e-15))
             eps_p_mag = np.clip(eps_p_mag, 0, 0.5)
-            _max_eps = float(np.max(eps_p_mag))
-            if _max_eps > 0.1:
-                # FIX: log instead of st.warning — solver methods must not
-                # touch the Streamlit ScriptRun context (breaks batch/sweep).
-                logger.warning("Large plastic strain detected: %.3f", _max_eps)
+            if np.max(eps_p_mag) > 0.1:
+                st.warning(f"⚠️ Large plastic strain detected: {np.max(eps_p_mag):.3f}")
             return eps_p_mag
         except Exception as e:
-            logger.error("Error computing plastic strain: %s", e)
+            st.error(f"Error computing plastic strain: {e}")
             return np.zeros_like(sigma_eq)
 
     @handle_errors
@@ -4813,7 +4760,7 @@ class NanotwinnedCuSolver:
             total_energy = np.sum(energy_density) * (self.dx**2)
             return total_energy
         except Exception as e:
-            logger.warning("Error computing energy: %s", e)
+            st.warning(f"Error computing energy: {e}")
             return 0.0
 
     @handle_errors
@@ -4846,52 +4793,36 @@ class NanotwinnedCuSolver:
             h = compute_twin_spacing_from_gradient(phi_gx, phi_gy)
 
             plastic_params = self.mat_props['plasticity']
-            # ── Hall–Petch unit-fix parity switch (Confound A) ──────────
-            #   hall_petch_units_fix=True  → h converted nm→m  (v10.0.0 fix;
-            #     HP term ≈ GPa, strongly patterned σ_y)
-            #   hall_petch_units_fix=False → h passed as-is   (legacy;
-            #     HP term ≈ Pa, effectively inert, σ_y ≈ σ₀ everywhere)
-            if self.params.get('hall_petch_units_fix', True):
-                h_m = h * 1e-9
-            else:
-                h_m = h
+            # ── File 1 parity: Hall–Petch unit fix toggle ────────────────
+            # ON  (hall_petch_units_fix=True) → h (nm) converted to metres
+            #     so the Hall–Petch term evaluates correctly (~100 MPa).
+            #     [File 2 v10.0.0 default]
+            # OFF (hall_petch_units_fix=False) → h passed unchanged, leaving
+            #     the HP term effectively inert.  [File 1 default behavior]
+            h_m = h * 1e-9 if self.params.get("hall_petch_units_fix", False) else h
             sigma_y = compute_yield_stress(
                 h_m, plastic_params['sigma0'], plastic_params['mu'],
                 plastic_params['b'], plastic_params['nu'])
 
-            eps_p_mag = self.compute_plastic_strain(
-                sigma_eq, sigma_y, sxx=sxx, syy=syy, sxy=sxy)
+            eps_p_mag = self.compute_plastic_strain(sigma_eq, sigma_y, sxx, syy, sxy)
 
-            new_phi = self.evolve_twin_field(sxx, syy, sxy, eps_p_mag)
-            # FIX: @handle_errors returns None on failure — guard against it
-            # so a transient error doesn't turn self.phi into None and crash
-            # the NEXT step's fft2(self.phi).
-            if new_phi is not None:
-                self.phi = new_phi
-            else:
-                self.step_errors.append("evolve_twin_field returned None")
-            new_eta = self.evolve_grain_fields()
-            if new_eta is not None:
-                self.eta1, self.eta2 = new_eta
-            else:
-                self.step_errors.append("evolve_grain_fields returned None")
+            self.phi = self.evolve_twin_field(sxx, syy, sxy, eps_p_mag)
+            self.eta1, self.eta2 = self.evolve_grain_fields()
 
             phi_norm = np.linalg.norm(self.phi)
             total_energy = self.compute_total_energy()
-            if total_energy is None:
-                total_energy = 0.0
             max_stress = np.max(sigma_eq)
             avg_stress = np.mean(sigma_eq)
             valid_h = h[(h > 5) & (h < 50)]
             avg_spacing = np.mean(valid_h) if valid_h.size > 0 else 0.0
             plastic_work = np.sum(eps_p_mag) * (self.dx**2)
 
-            self.history['phi_norm'].append(float(phi_norm))
-            self.history['energy'].append(float(total_energy))
-            self.history['max_stress'].append(float(max_stress))
-            self.history['avg_stress'].append(float(avg_stress))
-            self.history['plastic_work'].append(float(plastic_work))
-            self.history['twin_spacing_avg'].append(float(avg_spacing))
+            self.history['phi_norm'].append(phi_norm)
+            self.history['energy'].append(total_energy)
+            self.history['max_stress'].append(max_stress)
+            self.history['avg_stress'].append(avg_stress)
+            self.history['plastic_work'].append(plastic_work)
+            self.history['twin_spacing_avg'].append(avg_spacing)
 
             results = {
                 'phi': self.phi.copy(),
@@ -4909,20 +4840,17 @@ class NanotwinnedCuSolver:
                 'eps_yy': eps_yy.copy(),
                 'eps_xy': eps_xy.copy(),
                 'convergence': {
-                    'phi_norm': float(phi_norm),
-                    'energy': float(total_energy),
-                    'max_stress': float(max_stress),
-                    'avg_stress': float(avg_stress),
-                    'plastic_work': float(plastic_work),
-                    'avg_spacing': float(avg_spacing)
+                    'phi_norm': phi_norm,
+                    'energy': total_energy,
+                    'max_stress': max_stress,
+                    'avg_stress': avg_stress,
+                    'plastic_work': plastic_work,
+                    'avg_spacing': avg_spacing
                 }
             }
             return results
         except Exception as e:
-            # FIX: log + record instead of st.error — solver methods must not
-            # touch the Streamlit context (breaks batch/sweep/test runs).
-            logger.error("Error in simulation step: %s\n%s", e, traceback.format_exc())
-            self.step_errors.append(str(e))
+            st.error(f"Error in simulation step: {e}")
             zeros = np.zeros((self.N, self.N))
             return {
                 'phi': zeros, 'eta1': zeros, 'eta2': zeros,
@@ -5713,73 +5641,39 @@ def _pl_fmt(param: str, si_value: float) -> str:
 
 
 class PlasticityOllamaClient:
-    """Hardened Ollama client.
-
-    Connectivity fixes vs. the original:
-      * `is_available` / `list_models` are cached for 30 s via
-        `_ollama_tags_cache` so a dead host no longer adds 5 s to every
-        Streamlit rerun;
-      * `generate_json` gates on `is_available()` and **retries on a
-        200-OK-but-garbage response** (where `_parse_lenient` returns None),
-        not only on network exceptions;
-      * the last failure reason is stored in `self.last_status` so the
-        sidebar can surface "model not found" / "unreachable" / "garbage
-        output" to the user instead of silently falling back to heuristics.
-    """
-    _tags_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
-
     def __init__(self, url: str = "http://localhost:11434",
                  model: str = "qwen2.5:7b",
-                 timeout: float = 60.0, max_retries: int = 2):
+                 timeout: float = 120.0, max_retries: int = 2):
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
-        self.last_status: str = "ok"
-
-    @classmethod
-    def _tags(cls, url: str = "http://localhost:11434",
-              ttl: float = 30.0) -> Optional[Dict[str, Any]]:
-        """Cached /api/tags response (ttl seconds) shared across the app."""
-        now = time.time()
-        c = cls._tags_cache
-        if c["data"] is not None and (now - c["ts"]) < ttl:
-            return c["data"]
-        if not REQUESTS_AVAILABLE:
-            c["data"] = None
-            return None
-        try:
-            r = _requests.get(f"{url.rstrip('/')}/api/tags", timeout=3.0)
-            if r.status_code == 200:
-                c["data"] = r.json()
-                c["ts"] = now
-                return c["data"]
-        except Exception:
-            pass
-        c["data"] = None
-        return None
 
     @staticmethod
     def is_available(url: str = "http://localhost:11434") -> bool:
-        return PlasticityOllamaClient._tags(url) is not None
+        if not REQUESTS_AVAILABLE:
+            return False
+        try:
+            r = _requests.get(f"{url.rstrip('/')}/api/tags", timeout=2.0)
+            return r.status_code == 200
+        except Exception:
+            return False
 
     @staticmethod
     def list_models(url: str = "http://localhost:11434") -> List[str]:
-        data = PlasticityOllamaClient._tags(url)
-        if not data:
+        if not REQUESTS_AVAILABLE:
             return []
-        return sorted(m.get("name", "") for m in data.get("models", []))
+        try:
+            r = _requests.get(f"{url.rstrip('/')}/api/tags", timeout=3.0)
+            if r.status_code == 200:
+                return sorted(m.get("name", "") for m in r.json().get("models", []))
+        except Exception:
+            pass
+        return []
 
     def generate_json(self, prompt: str, system: Optional[str] = None,
                       debug: bool = False) -> Optional[Any]:
-        self.last_status = "ok"
         if not REQUESTS_AVAILABLE:
-            self.last_status = "requests not installed"
-            return None
-        if not self.is_available(self.url):
-            self.last_status = "ollama unreachable"
-            logger.warning("Ollama %s unreachable — LLM disabled, "
-                           "falling back to heuristics", self.url)
             return None
         payload: Dict[str, Any] = {
             "model": self.model, "prompt": prompt, "stream": False,
@@ -5792,34 +5686,19 @@ class PlasticityOllamaClient:
             try:
                 r = _requests.post(f"{self.url}/api/generate",
                                    json=payload, timeout=self.timeout)
-                if r.status_code == 404:
-                    self.last_status = f"model '{self.model}' not found"
-                    logger.error("Ollama 404: %s", self.last_status)
-                    return None
                 r.raise_for_status()
                 raw = r.json().get("response", "")
+                parsed = self._parse_lenient(raw)
                 if debug:
                     logger.info("Ollama raw (first 800 chars): %s", str(raw)[:800])
                 else:
                     logger.debug("Ollama raw (first 400 chars): %s", (raw or "")[:400])
-                parsed = self._parse_lenient(raw)
-                if parsed is None:
-                    # 200-OK but unparseable — retry once more, then surface.
-                    logger.warning("Ollama returned unparseable JSON "
-                                   "(attempt %d/%d)", attempt + 1, self.max_retries + 1)
-                    if attempt == self.max_retries:
-                        self.last_status = "garbage output"
-                        return None
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
                 return parsed
             except Exception as e:
                 logger.warning("Ollama attempt %d failed: %s", attempt + 1, e)
                 if attempt == self.max_retries:
-                    self.last_status = f"network error: {type(e).__name__}"
                     return None
                 time.sleep(0.75 * (attempt + 1))
-        self.last_status = "exhausted retries"
         return None
 
     @staticmethod
@@ -6265,22 +6144,10 @@ class PlasticityParameterExtractor:
             if p is None: continue
             v, unit = _coerce_value(item)
             if v is None: continue
-            # FIX: coerce temp/strain_rate to float — the LLM often returns
-            # strings like "300K" or "1e-3 /s", which would crash downstream
-            # float(temp_k) arithmetic.  None stays None.
-            def _coerce_scalar(x):
-                if x is None:
-                    return None
-                if isinstance(x, (int, float)):
-                    return float(x)
-                s = str(x).strip()
-                m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-                return float(m.group()) if m else None
             out.append({
                 "param": p, "value": float(v), "unit": str(unit or ""),
                 "material": str(item.get("material") or ""),
-                "temp": _coerce_scalar(item.get("temp")),
-                "strain_rate": _coerce_scalar(item.get("strain_rate")),
+                "temp": item.get("temp"), "strain_rate": item.get("strain_rate"),
                 "method": str(item.get("method") or "unknown").lower(),
                 "confidence": float(item.get("confidence", 0.5) or 0.5),
                 "evidence": str(item.get("evidence") or "")[:240],
@@ -7421,16 +7288,13 @@ def _build_ollama_dropdown_options() -> Dict[str, str]:
     return options
 
 
-def purge_plasticity_caches() -> Tuple[List[str], List[str]]:
-    """Purge every plasticity cache. Returns (purged, failures) so the UI
-    can surface silent failures instead of hiding them behind bare `except: pass`."""
+def purge_plasticity_caches() -> List[str]:
     purged: List[str] = []
-    failures: List[str] = []
     try:
         st.cache_resource.clear()
         purged.append("streamlit cache_resource (hybrid retriever)")
-    except Exception as e:
-        failures.append(f"cache_resource: {e}")
+    except Exception:
+        pass
     corpus_key = f"pl_corpus_{PlasticityCorpus._CACHE_VERSION}"
     if corpus_key in st.session_state:
         st.session_state.pop(corpus_key, None)
@@ -7454,7 +7318,6 @@ def purge_plasticity_caches() -> Tuple[List[str], List[str]]:
                 live_rec.hybrid = None
                 purged.append("in-memory hybrid retriever reference")
         except Exception as e:
-            failures.append(f"live recommender caches: {e}")
             logger.warning("Could not purge live recommender caches: %s", e)
     cache_dir = PlasticityFAISSRetriever.CACHE_DIR
     if os.path.isdir(cache_dir):
@@ -7463,14 +7326,12 @@ def purge_plasticity_caches() -> Tuple[List[str], List[str]]:
             try:
                 os.remove(idx_path); purged.append(PlasticityFAISSRetriever.INDEX_FILE)
             except Exception as e:
-                failures.append(f"{idx_path}: {e}")
                 logger.warning("Could not remove %s: %s", idx_path, e)
         llm_cache_path = os.path.join(cache_dir, PlasticityRecommender.LLM_CACHE_FILE)
         if os.path.exists(llm_cache_path):
             try:
                 os.remove(llm_cache_path); purged.append(PlasticityRecommender.LLM_CACHE_FILE)
             except Exception as e:
-                failures.append(f"{llm_cache_path}: {e}")
                 logger.warning("Could not remove %s: %s", llm_cache_path, e)
         try:
             for fname in os.listdir(cache_dir):
@@ -7482,12 +7343,11 @@ def purge_plasticity_caches() -> Tuple[List[str], List[str]]:
                 fpath = os.path.join(cache_dir, fname)
                 try:
                     os.remove(fpath); purged.append(fname)
-                except Exception as e:
-                    failures.append(f"{fpath}: {e}")
+                except Exception:
+                    pass
         except Exception as e:
-            failures.append(f"cache dir sweep: {e}")
             logger.warning("Cache dir sweep failed: %s", e)
-    return purged, failures
+    return purged
 
 
 # ----------------------------------------------------------------------------
@@ -7739,28 +7599,19 @@ def render_plasticity_recommender_sidebar(
     ollama_model = model_options.get(selected_display, "")
     if not ollama_model:
         llm_ok = False
-        _status_txt = "LLM disabled — using heuristic extractor"
     else:
         llm_ok = PlasticityOllamaClient.is_available()
-        if llm_ok:
-            _status_txt = "✅ Ollama available"
-        else:
-            _status_txt = ("⚠️ Ollama unreachable — Tier-1/3 LLM calls will "
-                            "fail fast (~3 s) and fall back to heuristics. "
-                            "Start it with `ollama serve`.")
-    # Propagate to session_state so PlasticityRecommender can gate LLM calls
-    # without re-probing (the probe is cached for 30 s inside the client).
-    st.session_state["_plr_llm_ok"] = llm_ok
-    st.session_state["_plr_llm_model"] = ollama_model
-    st.caption(_status_txt)
     backend_txt = (
         "hybrid(lexical+faiss)" if FAISS_AVAILABLE and SBERT_AVAILABLE
         else "hybrid(lexical+dense-numpy)" if SBERT_AVAILABLE
         else "hybrid(lexical-only)")
     bc1, bc2 = st.columns(2)
     with bc1:
-        st.caption(f"{'✅' if llm_ok else '⚠️'} Ollama "
-                   f"{'available' if llm_ok else 'unreachable'}")
+        if not ollama_model:
+            st.caption("⚡ LLM disabled — using heuristic extractor")
+        else:
+            st.caption(f"{'✅' if llm_ok else '⚠️'} Ollama "
+                       f"{'available' if llm_ok else 'unreachable'}")
     with bc2:
         st.caption(f"🔎 Retrieval: `{backend_txt}`")
     use_grounded = st.checkbox(
@@ -7869,20 +7720,17 @@ def render_plasticity_recommender_sidebar(
 
     if refresh_btn:
         try:
-            purged_items, failures = purge_plasticity_caches()
+            purged_items = purge_plasticity_caches()
             st.session_state.pop("_plr_live_recommender", None)
         except Exception as e:
             st.warning(f"Could not clear all caches: {e}")
-            purged_items, failures = [], [str(e)]
+            purged_items = []
         if purged_items:
             st.success("✅ Purged: " +
                        ", ".join(f"`{p}`" for p in purged_items) +
                        ". Next **Analyse** will run fresh.")
         else:
             st.info("ℹ️ Nothing to purge — caches were already empty.")
-        if failures:
-            st.warning("⚠️ Some caches could not be purged: " +
-                       "; ".join(failures))
 
     if run_btn:
         recommender = PlasticityRecommender(
@@ -9452,6 +9300,28 @@ def main():
                                              key="scalebar_color")
             scalebar_fontsize = st.slider("Scale bar font size", 6, 20, 10, 1,
                                           key="scalebar_fontsize")
+            with st.expander("🎛️ Parity switches (File 1 compatibility)", expanded=False):
+                st.caption("Defaults = File 1 (no-AI) behaviour. "
+                           "Toggle ON to match File 2 (AI recommender) "
+                           "v10.0.0 physics fixes.")
+                st.checkbox("A · Hall–Petch unit fix (h×1e-9)",
+                            value=False, key="hall_petch_units_fix",
+                            help=("ON: convert twin spacing h from nm to m "
+                                  "before Hall–Petch (File 2 v10 default). "
+                                  "OFF: pass h unchanged — HP term inert "
+                                  "(File 1 default)."))
+                st.checkbox("D · Strong stabilizer (L_ITB·κ₀·(1+γ_aniso))",
+                            value=False, key="parity_stabilizer",
+                            help=("ON: implicit diffusion uses the strong "
+                                  "ITB-based stabilizer (File 2 v10 "
+                                  "default).  OFF: weak CTB-only stabilizer "
+                                  "L_CTB·κ₀ (File 1 default)."))
+                st.checkbox("C · Associated (normality) flow rule",
+                            value=False, key="associated_flow",
+                            help=("ON: plastic-flow direction follows the "
+                                  "actual deviatoric stress tensor "
+                                  "(File 2 v10 default).  OFF: fixed-sign "
+                                  "flow rule (File 1 default)."))
             if st.button("🚀 Initialize Simulation", type="primary",
                          use_container_width=True):
                 params = {
@@ -9481,7 +9351,10 @@ def main():
                     'global_cmap_stress': global_cmap_stress,
                     'global_cmap_hydro': global_cmap_hydro,
                     'scalebar_color': scalebar_color,
-                    'scalebar_fontsize': scalebar_fontsize}
+                    'scalebar_fontsize': scalebar_fontsize,
+                    'hall_petch_units_fix': st.session_state.get('hall_petch_units_fix', False),
+                    'parity_stabilizer': st.session_state.get('parity_stabilizer', False),
+                    'associated_flow': st.session_state.get('associated_flow', False)}
                 if geometry_type == "Twin Grain with Defect":
                     params['defect_type'] = defect_type.lower()
                     params['defect_pos'] = (defect_x, defect_y)
