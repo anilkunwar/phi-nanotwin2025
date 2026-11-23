@@ -92,6 +92,11 @@ Value Hint (Empty Space Default Features for Finetuning the Plasticity Parameter
 
 
 
+Bug in r22b: The r22b version in unconstrained manner hardcoded the Hall–Petch unit fix (converting twin spacing from nm to meters) and the strong stabilizer strength, fundamentally altering the yield stress and twin-field evolution compared to File 1's default opt-in toggle architecture. Furthermore, it completely lacked the associated (normality) plastic flow rule present in benchmarked code, preventing exact reproduction of benchmark code's full "AI parity" benchmark configuration.
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata23-streamlit-red)](https://nanotwin-evolution-mechanics-nlp23.streamlit.app/) (Bug of r22b fixed, Upgrade on r20 with physics-informed bias about nanostructure and processing routes, Structural reform on the Intelligent Plasticity Recommender with Context-Awareness - especially enhancement of the PlasticityLatentMoEScorer class with MCDA  Explainable AI, and Context-Aware Scoring in addition to the MoE base, Inverse strain rate sensitivity  mathematically correct but occurs as strain rate sensitivity in labels, Keyterms enhancement for successful NER extraction of hear modulus, Lattice friction stress, rho0, reference strain rate and inverse strain rate sensitivity, Cross-validation of recommended parameters, LatentMoE visualization customization enhancement and further upgrades, R9 with advanced reasoning with the reasoning  fully functional, use_llm=False to use_llm=True in the prior_learner.learn() call, cache removal function strengthened,contingency plan in prompt for all plasiticty parameters, V5 with added visualization in the plasticity properties recommendation section, Dropdown list of multiple LLMs model for The "Reading" & NER Phase, plasticity parameters intelligent recommender, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata23a-streamlit-red)](https://nanotwin-evolution-mechanics-nlp23a.streamlit.app/) ( Customization of figures in r23)
 
 
 
