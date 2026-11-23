@@ -1034,6 +1034,32 @@ JOURNAL_PRESETS_SIM: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _to_hex_color(c):
+    """Normalize any color (named, hex, tuple) to a #RRGGBB hex string.
+
+    st.color_picker only accepts hex codes (#RRGGBB or #RGB), but style
+    defaults and matplotlib code paths sometimes carry named colors
+    ('black', 'white', 'grey', ...). This guarantees a valid hex value
+    reaches the picker and prevents StreamlitAPIException on named colors.
+    """
+    if not c:
+        return '#000000'
+    s = str(c).strip()
+    if s.startswith('#'):
+        h = s.lstrip('#')
+        if len(h) == 3:
+            h = ''.join(ch * 2 for ch in h)
+        if len(h) >= 6:
+            return '#' + h[:6].upper()
+        return '#000000'
+    try:
+        import matplotlib.colors as _mc
+        hx = _mc.to_hex(s).lstrip('#')
+        return '#' + hx[:6].upper()
+    except Exception:
+        return '#000000'
+
+
 @dataclass
 class SimulationVisualStyle:
     """All publication-quality knobs for field maps, curves and convergence plots."""
@@ -1082,7 +1108,7 @@ class SimulationVisualStyle:
     # ── Scale bar ────────────────────────────────────────────────────────
     scale_bar_show: bool = True
     scale_bar_length_nm: float = 10.0
-    scale_bar_color: str = 'black'
+    scale_bar_color: str = '#000000'
     scale_bar_linewidth: float = 2.0
     scale_bar_location: str = 'lower right'
     scale_bar_box: bool = True           # white halo behind text for legibility
@@ -1736,7 +1762,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
                 float(style.spine_width), 0.05,
                 key=f"{key_prefix}_spw")
             style.spine_color = st.color_picker(
-                "Spine color", style.spine_color,
+                "Spine color", _to_hex_color(style.spine_color),
                 key=f"{key_prefix}_spc")
             sc1, sc2 = st.columns(2)
             with sc1:
@@ -1780,15 +1806,15 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
                 "Show minor ticks", value=style.show_minor_ticks,
                 key=f"{key_prefix}_smt")
             style.tick_color = st.color_picker(
-                "Tick color", style.tick_color,
+                "Tick color", _to_hex_color(style.tick_color),
                 key=f"{key_prefix}_tckc")
         with b3:
             st.markdown("**Backgrounds & grid**")
             style.background_color = st.color_picker(
-                "Figure bg", style.background_color,
+                "Figure bg", _to_hex_color(style.background_color),
                 key=f"{key_prefix}_bgc")
             style.plot_background_color = st.color_picker(
-                "Plot bg", style.plot_background_color,
+                "Plot bg", _to_hex_color(style.plot_background_color),
                 key=f"{key_prefix}_pbg")
             style.show_grid = st.checkbox(
                 "Show grid", value=style.show_grid,
@@ -1991,7 +2017,7 @@ def render_simulation_style_controls(key_prefix: str = 'sim',
                     key=f"{key_prefix}_sb_lw")
             with sb2:
                 style.scale_bar_color = st.color_picker(
-                    "Color", style.scale_bar_color,
+                    "Color", _to_hex_color(style.scale_bar_color),
                     key=f"{key_prefix}_sb_col")
                 style.scale_bar_location = st.selectbox(
                     "Location", ['lower right', 'lower left',
@@ -10357,17 +10383,17 @@ def render_recommender_style_controls() -> RecommenderVisualStyle:
         c1, c2 = st.columns(2)
         with c1:
             style.background_color = st.color_picker(
-                "Figure background", style.background_color,
+                "Figure background", _to_hex_color(style.background_color),
                 key="rec_bg_color")
             style.plot_background_color = st.color_picker(
-                "Plot background", style.plot_background_color,
+                "Plot background", _to_hex_color(style.plot_background_color),
                 key="rec_plot_bg")
             style.transparent_bg = st.checkbox(
                 "Transparent background (for export)",
                 value=style.transparent_bg, key="rec_transp_bg")
         with c2:
             style.spine_color = st.color_picker(
-                "Spine / tick color", style.spine_color,
+                "Spine / tick color", _to_hex_color(style.spine_color),
                 key="rec_spine_color")
             style.spine_width = st.slider(
                 "Spine width", 0.5, 4.0, float(style.spine_width),
