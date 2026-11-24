@@ -8,7 +8,7 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata3-streamlit-turquoise)](https://nanotwin-evolution-mechanics3.streamlit.app/) (r2 with colormap functionality for phase field simulation results visualizations, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
 
-self consistent solver with realistic migration velocity of 5.0 m/s
+## self consistent solver with realistic migration velocity of 5.0 m/s
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata4-streamlit-turquoise)](https://nanotwin-evolution-mechanics4.streamlit.app/) (r2 with colormap functionality for phase field simulation results visualizations, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata4-streamlit-brightgreen)](https://nanotwin-evolution-mechanics4.streamlit.app/) (r2 with colormap functionality for phase field simulation results visualizations, default delta t =1e-3 s, in update_plastic_strain func, max overstress = 1.0, max plastic strain = 0.1 and stress_dev = np.minimum(stress_dev,0.001), the plastic strain is now within reasonable limit )
 
