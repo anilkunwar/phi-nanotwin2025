@@ -98,6 +98,14 @@ Bug in r22b: The r22b version in unconstrained manner hardcoded the Hall–Petch
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata23a-streamlit-red)](https://nanotwin-evolution-mechanics-nlp23a.streamlit.app/) ( Customization of figures in r23)
 
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata23b-streamlit-red)](https://nanotwin-evolution-mechanics-nlp23b.streamlit.app/) ( Customization of figures in r23)
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata23c-streamlit-red)](https://nanotwin-evolution-mechanics-nlp23c.streamlit.app/) ( Customization of figures in r23, the prevenstion of change of figure sizes when slider is changed)
+
+Self-consistent solver for realistic migration velocity
+
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata24-streamlit-red)](https://nanotwin-evolution-mechanics-nlp24.streamlit.app/) ( Customization of figures in r23, design of time span to several ns for making the solver self-consistent at 5 m/s migration velocity )
+
 
 
 
