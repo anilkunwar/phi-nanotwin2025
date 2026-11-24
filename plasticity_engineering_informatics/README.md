@@ -106,7 +106,7 @@ Self-consistent solver for realistic migration velocity
 
 [![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata24-streamlit-red)](https://nanotwin-evolution-mechanics-nlp24.streamlit.app/) ( Customization of figures in r23, design of time span to several ns for making the solver self-consistent at 5 m/s migration velocity,  Driving Force × Mobility Mismatch, difference in elastic energy consumes grain 1 in the large simulation run )
 
-[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata24a-streamlit-red)](https://nanotwin-evolution-mechanics-nlp24a.streamlit.app/) ( Customization of figures in r23, design of time span to several ns for making the solver self-consistent at 5 m/s migration velocity, the  Driving Force × Mobility Mismatch and difference in elastic energy consumes grain 1 in the large simulation run, issues are resolved by introducing a post-hoc time scaling factor )
+[![continuummodelnt2d](https://img.shields.io/badge/nanotwincudata24a-streamlit-red)](https://nanotwin-evolution-mechanics-nlp24a.streamlit.app/) ( Customization of figures in r23, design of time span to several ns for making the solver self-consistent at 5 ms-1 migration velocity, the  Driving Force × Mobility Mismatch and difference in elastic energy consumes grain 1 in the large simulation run, issues are resolved by introducing a post-hoc time scaling factor directly in r23c )
 
 
 
